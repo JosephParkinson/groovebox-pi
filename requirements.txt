@@ -1,0 +1,4 @@
+Pillow
+mido
+python-rtmidi
+simpleaudio
