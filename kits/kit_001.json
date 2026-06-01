@@ -1,0 +1,12 @@
+{
+  "pads": [
+    "samples/04_Op_Hat_BlindAudio_M808.wav",
+    "samples/03_Cl_Hat_BlindAudio_M808.wav",
+    "samples/05_Clave_BlindAudio_M808.wav",
+    "samples/06_Rim_BlindAudio_M808.wav",
+    "samples/01_Kick_BlindAudio_M808.wav",
+    "samples/02_Snare_BlindAudio_M808.wav",
+    "samples/07_Shaker_BlindAudio_M808.wav",
+    "samples/08_Cowbell_BlindAudio_M808.wav"
+  ]
+}
