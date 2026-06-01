@@ -320,31 +320,39 @@ class LoopEvent:
 
 
 class LoopChannel:
+    VALID_BARS = (1, 2, 4, 8)
+
     def __init__(self):
         self.state:  str       = ChanState.EMPTY
+        self.bars:   int       = 4      # loop length in bars (1 bar = 4 beats)
         self.events: list      = []
         self._fired: set[int]  = set()
+
+    @property
+    def beats(self) -> int:
+        return self.bars * 4
 
     def reset(self) -> None:
         self.state  = ChanState.EMPTY
         self.events = []
         self._fired = set()
+        # bars intentionally preserved across reset
 
 
 class LoopEngine:
-    BEATS = 16           # 4 bars × 4 beats/bar
-    _HAT_SLOT = 8        # virtual pad slot (outside 0-7 kit pads)
+    _HAT_SLOT = 8        # virtual pad slot for count-in / metronome hat
 
     def __init__(self, kit: Kit):
-        self.kit      = kit
-        self.bpm      = 120.0
-        self.channels = [LoopChannel() for _ in range(4)]
-        self._phase   = "idle"   # "idle" | "count_in" | "running"
-        self._t0      = 0.0
-        self._ci_start = 0.0
-        self._ci_beat  = -1
+        self.kit        = kit
+        self.bpm        = 120.0
+        self.metronome  = False
+        self.channels   = [LoopChannel() for _ in range(4)]
+        self._phase     = "idle"   # "idle" | "count_in" | "running"
+        self._t0        = 0.0
+        self._ci_start  = 0.0
+        self._ci_beat   = -1
         self._hat_path: str | None = None
-        self._lock     = threading.Lock()
+        self._lock      = threading.Lock()
         self._find_and_preload_hat()
         threading.Thread(target=self._run, daemon=True).start()
 
@@ -374,15 +382,15 @@ class LoopEngine:
                 c.state = ChanState.PRIMED
 
     def note(self, pad: int) -> None:
-        """Play a pad hit and record it if any channel is recording."""
+        """Play a pad hit and record it (channel-relative beat position)."""
         _trigger_pad(pad, self.kit)
         with self._lock:
             if self._phase != "running":
                 return
-            beat = (time.monotonic() - self._t0) / self.beat_dur % self.BEATS
+            global_beat = (time.monotonic() - self._t0) / self.beat_dur
             for c in self.channels:
                 if c.state == ChanState.RECORDING:
-                    c.events.append(LoopEvent(beat, pad))
+                    c.events.append(LoopEvent(global_beat % c.beats, pad))
 
     def stop(self) -> None:
         with self._lock:
@@ -390,11 +398,34 @@ class LoopEngine:
             for c in self.channels:
                 c.reset()
 
+    def set_bars(self, ch: int, direction: int) -> None:
+        """Cycle bars count (1/2/4/8) for an EMPTY channel. direction: +1 or -1."""
+        with self._lock:
+            c = self.channels[ch]
+            if c.state == ChanState.EMPTY:
+                vals = LoopChannel.VALID_BARS
+                idx = vals.index(c.bars) if c.bars in vals else 0
+                c.bars = vals[(idx + direction) % len(vals)]
+
     def loop_pos(self) -> float | None:
-        """0.0–1.0 through the current loop cycle, or None if not running."""
+        """Global position bar: 0.0–1.0, based on longest active channel."""
         if self._phase != "running":
             return None
-        return ((time.monotonic() - self._t0) / self.beat_dur % self.BEATS) / self.BEATS
+        active = [c.beats for c in self.channels
+                  if c.state in (ChanState.RECORDING, ChanState.PLAYING)]
+        max_beats = max(active) if active else 16
+        global_beat = (time.monotonic() - self._t0) / self.beat_dur
+        return (global_beat % max_beats) / max_beats
+
+    def channel_pos(self, ch: int) -> float | None:
+        """0.0–1.0 through the channel's own loop cycle."""
+        if self._phase != "running":
+            return None
+        c = self.channels[ch]
+        if c.state not in (ChanState.RECORDING, ChanState.PLAYING):
+            return None
+        global_beat = (time.monotonic() - self._t0) / self.beat_dur
+        return (global_beat % c.beats) / c.beats
 
     def count_beat(self) -> int | None:
         """0-3 during count-in, None otherwise."""
@@ -471,45 +502,54 @@ class LoopEngine:
         return result
 
     def _tick_running(self, now: float, last: float) -> list:
-        t0 = self._t0
-        bd = self.beat_dur
-        N  = self.BEATS
+        t0  = self._t0
+        bd  = self.beat_dur
+        result: list = []
 
-        old_abs = max(0.0, last - t0) / bd
-        new_abs = (now - t0) / bd
-        old_cycle = int(old_abs / N)
-        new_cycle = int(new_abs / N)
-        wrapped   = new_cycle > old_cycle
+        old_global = max(0.0, last - t0) / bd
+        new_global = (now  - t0) / bd
 
-        new_pos = new_abs % N
-        result  = []
+        # Metronome click on each new integer beat
+        if self.metronome and int(new_global) > int(old_global):
+            result.append("hat")
 
-        if wrapped:
-            # Fire any events that landed in the tail of the previous cycle
-            for c in self.channels:
+        for c in self.channels:
+            N = c.beats  # channel-specific loop length
+
+            if c.state == ChanState.PRIMED:
+                # Start recording at the next multiple-of-N beat boundary
+                if int(new_global / N) > int(old_global / N):
+                    c.state  = ChanState.RECORDING
+                    c.events = []
+                    c._fired = set()
+                continue
+
+            if c.state not in (ChanState.RECORDING, ChanState.PLAYING):
+                continue
+
+            old_cycle = int(old_global / N)
+            new_cycle = int(new_global / N)
+            wrapped   = new_cycle > old_cycle
+            new_pos   = new_global % N
+
+            if wrapped:
+                # Drain unfired tail events from the previous cycle
                 if c.state == ChanState.PLAYING:
                     for i, ev in enumerate(c.events):
                         if i not in c._fired:
                             c._fired.add(i)
                             result.append(ev.pad)
-            # Cycle boundary transitions
-            for c in self.channels:
+                # Transition RECORDING → PLAYING
                 if c.state == ChanState.RECORDING:
                     c.state = ChanState.PLAYING
                     c.events.sort(key=lambda e: e.beat)
-                elif c.state == ChanState.PRIMED:
-                    c.state  = ChanState.RECORDING
-                    c.events = []
                 c._fired = set()
 
-        # Fire events in current cycle up to new_pos
-        for c in self.channels:
-            if c.state != ChanState.PLAYING:
-                continue
-            for i, ev in enumerate(c.events):
-                if i not in c._fired and ev.beat <= new_pos:
-                    c._fired.add(i)
-                    result.append(ev.pad)
+            if c.state == ChanState.PLAYING:
+                for i, ev in enumerate(c.events):
+                    if i not in c._fired and ev.beat <= new_pos:
+                        c._fired.add(i)
+                        result.append(ev.pad)
 
         return result
 
@@ -828,23 +868,28 @@ class LooperScreen(Screen):
         **{k.lower(): i     for i, k in enumerate("QWER")},
         **{k.lower(): i + 4 for i, k in enumerate("ASDF")},
     }
-    _BAR_X  = 22
-    _BAR_W  = 156
-    _BAR_H  = 14
-    _ROW_Y  = [48, 72, 96, 120]   # y-top of each channel row
+    _BAR_X = 20
+    _BAR_W = 130
+    _BAR_H = 14
+    _ROW_Y = [48, 72, 96, 120]   # y-top of each channel row
 
     def __init__(self, kit: Kit, engine: LoopEngine):
         self.kit    = kit
         self.engine = engine
+        self.cursor = 0  # selected channel (for bar-length editing)
 
     # ── Drawing ───────────────────────────────────────────────────────────────
 
     def draw(self, draw, font, small):
-        # Title + BPM
+        # Title
         draw.text((6, 6), "LOOPER", fill=FG, font=font)
-        bpm_txt = str(int(self.engine.bpm))
-        bx = draw.textbbox((0, 0), bpm_txt, font=font)
-        draw.text((WIDTH - bx[2] - 6, 6), bpm_txt, fill=FG, font=font)
+
+        # BPM (with metronome dot)
+        met = "● " if self.engine.metronome else "○ "
+        bpm_txt = met + str(int(self.engine.bpm))
+        bx = draw.textbbox((0, 0), bpm_txt, font=small)
+        draw.text((WIDTH - bx[2] - 4, 10), bpm_txt,
+                  fill=HIGHLIGHT if self.engine.metronome else FG, font=small)
 
         # Global position / count-in bar
         self._draw_pos_bar(draw)
@@ -853,13 +898,12 @@ class LooperScreen(Screen):
         for i, y in enumerate(self._ROW_Y):
             self._draw_channel(draw, small, i, y)
 
-        hint = "1-4:arm  -/=:bpm  r:stop  Bksp:back"
+        hint = "↑↓:sel ←→:bars 1-4:arm -/=:bpm m:met r:rst"
         draw.text((centered_x(draw, hint, small), HEIGHT - 22), hint, fill=(75, 75, 75), font=small)
 
     def _draw_pos_bar(self, draw) -> None:
         bx, by, bw, bh = 4, 28, WIDTH - 8, 8
         draw.rectangle([bx, by, bx + bw, by + bh], outline=FG_DIM)
-
         cb = self.engine.count_beat()
         lp = self.engine.loop_pos()
         if cb is not None:
@@ -873,36 +917,33 @@ class LooperScreen(Screen):
                 draw.rectangle([bx, by, bx + fw, by + bh], fill=HIGHLIGHT)
 
     def _draw_channel(self, draw, small, idx: int, y: int) -> None:
-        ch     = self.engine.channels[idx]
-        state  = ch.state
-        bx, bw, bh = self._BAR_X, self._BAR_W, self._BAR_H
+        ch    = self.engine.channels[idx]
+        state = ch.state
+        sel   = idx == self.cursor
 
         state_cfg = {
-            ChanState.EMPTY:     ("—",    FG_DIM,  None,      None),
-            ChanState.PRIMED:    ("WAIT", _AMBER,  None,      _AMBER),
-            ChanState.COUNTING:  ("CNT",  _AMBER,  None,      _AMBER),
-            ChanState.RECORDING: ("REC",  _RED,    _RED,      _RED),
-            ChanState.PLAYING:   ("PLAY", GREEN,   GREEN,     GREEN),
+            ChanState.EMPTY:     ("—",    FG_DIM, None,   None),
+            ChanState.PRIMED:    ("WAIT", _AMBER, None,   _AMBER),
+            ChanState.COUNTING:  ("CNT",  _AMBER, None,   _AMBER),
+            ChanState.RECORDING: ("REC",  _RED,   _RED,   _RED),
+            ChanState.PLAYING:   ("PLAY", GREEN,  GREEN,  GREEN),
         }
-        label, lbl_col, fill_col, border_col = state_cfg.get(
-            state, ("?", FG_DIM, None, FG_DIM)
-        )
+        label, lbl_col, fill_col, border_col = state_cfg.get(state, ("?", FG_DIM, None, FG_DIM))
 
-        # Channel number label
-        draw.text((6, y + 1), str(idx + 1), fill=lbl_col, font=small)
-
-        # Progress bar background
-        if border_col:
-            draw.rectangle([bx, y, bx + bw, y + bh], outline=border_col)
+        # Channel number with cursor highlight
+        if sel:
+            draw.rectangle([2, y - 1, 17, y + self._BAR_H + 1], fill=FG_DIM)
+            draw.text((4, y + 1), str(idx + 1), fill=BG, font=small)
         else:
-            draw.rectangle([bx, y, bx + bw, y + bh], outline=FG_DIM)
+            draw.text((4, y + 1), str(idx + 1), fill=lbl_col, font=small)
 
-        # Progress fill
-        pos = self.engine.loop_pos()
+        # Progress bar
+        bx, bw, bh = self._BAR_X, self._BAR_W, self._BAR_H
+        draw.rectangle([bx, y, bx + bw, y + bh], outline=border_col or FG_DIM)
+        pos = self.engine.channel_pos(idx)
         if pos is not None and fill_col:
             fw = int(pos * bw)
             if state == ChanState.PLAYING:
-                # Full green bar + white playback cursor
                 draw.rectangle([bx, y, bx + bw, y + bh], fill=fill_col)
                 cx = bx + fw
                 draw.line([(cx, y), (cx, y + bh)], fill=WHITE, width=2)
@@ -910,7 +951,12 @@ class LooperScreen(Screen):
                 draw.rectangle([bx, y, bx + fw, y + bh], fill=fill_col)
 
         # State label
-        draw.text((WIDTH - 56, y + 1), label, fill=lbl_col, font=small)
+        draw.text((155, y + 1), label, fill=lbl_col, font=small)
+
+        # Bar count
+        bar_txt = f"{ch.bars}b"
+        bar_col = FG if state == ChanState.EMPTY else FG_DIM
+        draw.text((202, y + 1), bar_txt, fill=bar_col, font=small)
 
     # ── Input ─────────────────────────────────────────────────────────────────
 
@@ -918,11 +964,21 @@ class LooperScreen(Screen):
         k = key.lower()
         if key == "BackSpace":
             return "back"
+        elif key == "Up":
+            self.cursor = (self.cursor - 1) % 4
+        elif key == "Down":
+            self.cursor = (self.cursor + 1) % 4
+        elif key == "Left":
+            self.engine.set_bars(self.cursor, -1)
+        elif key == "Right":
+            self.engine.set_bars(self.cursor, +1)
         elif key == "r":
             self.engine.stop()
-        elif key == "minus":
+        elif key == "m":
+            self.engine.metronome = not self.engine.metronome
+        elif key in ("minus", "-"):
             self.engine.bpm = max(40.0, self.engine.bpm - 1)
-        elif key == "equal":
+        elif key in ("equal", "="):
             self.engine.bpm = min(300.0, self.engine.bpm + 1)
         elif key in "1234":
             self.engine.prime(int(key) - 1)
@@ -956,12 +1012,17 @@ class LCDEmulator:
             threading.Thread(target=lambda: _preload_all(kit), daemon=True).start()
 
         root.bind("<Key>", self._on_key)
+        root.lift()           # bring window to front
+        root.focus_force()    # grab keyboard focus without requiring a mouse click
         self._tick()
 
     def _on_key(self, event):
         if not self.stack:
             return
         result = self.stack[-1].handle_key(event.keysym)
+        # macOS may give a different keysym for symbol keys (-/=); try char as fallback
+        if result is None and event.char and event.char != event.keysym:
+            result = self.stack[-1].handle_key(event.char)
         if result == "back":
             if len(self.stack) > 1:
                 self.stack.pop()
