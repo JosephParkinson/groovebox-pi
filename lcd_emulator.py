@@ -6,6 +6,11 @@ import sys
 import shutil
 import subprocess
 import threading
+import json
+import os
+import tempfile
+import wave
+import struct
 from abc import ABC, abstractmethod
 from pathlib import Path
 
@@ -22,6 +27,20 @@ def _is_wsl() -> bool:
         return False
 
 _WSL = _is_wsl()
+
+
+def _linux_to_win(path: str) -> str:
+    """Convert /mnt/X/... to X:\\... without spawning a subprocess."""
+    if path.startswith("/mnt/"):
+        parts = path[5:].split("/", 1)
+        drive = parts[0].upper()
+        rest = parts[1].replace("/", "\\") if len(parts) > 1 else ""
+        return f"{drive}:\\{rest}"
+    return subprocess.check_output(
+        ["wslpath", "-w", path], stderr=subprocess.DEVNULL
+    ).decode().strip()
+
+KITS_DIR = Path("kits")
 
 WIDTH, HEIGHT = 240, 240
 
@@ -69,47 +88,135 @@ def pad_rect(index: int) -> tuple[int, int, int, int]:
     return x, y, x + PAD_W, y + PAD_H
 
 
-class _WinAudioServer:
-    """Persistent powershell.exe process for low-latency WAV playback on WSL2.
+# Trigger directory on the Windows filesystem — FileSystemWatcher works reliably here.
+_TRIGGER_DIR = Path("/mnt/c/Windows/Temp/groovebox-triggers")
 
-    Starts once; play commands are written to its stdin so there is no
-    per-sound process-launch overhead.  System.Media.SoundPlayer.Play()
-    is async inside PowerShell, so multiple pads can overlap.
+_PS_WATCHER = r"""
+param($watchDir)
+$players = @{}
+$watcher  = New-Object System.IO.FileSystemWatcher $watchDir, "*"
+$watcher.EnableRaisingEvents = $true
+$watcher.NotifyFilter = [System.IO.NotifyFilters]::FileName
+
+# Pick up preload files written before the watcher started watching
+foreach ($fi in (Get-ChildItem $watchDir -Filter "preload_*.cmd" -ErrorAction SilentlyContinue)) {
+    try { $content = (Get-Content $fi.FullName -Raw -ErrorAction Stop).Trim() } catch { continue }
+    Remove-Item $fi.FullName -Force -ErrorAction SilentlyContinue
+    if ($fi.Name -match '^preload_(\d+)\.cmd$') {
+        $p = New-Object System.Media.SoundPlayer $content
+        $p.Load()
+        $players[[int]$Matches[1]] = $p
+    }
+}
+
+while ($true) {
+    $r = $watcher.WaitForChanged([System.IO.WatcherChangeTypes]::Created, 5)
+    if (-not $r.TimedOut) {
+        # Collect the triggering file plus any that arrived while we were processing.
+        $names = [System.Collections.Generic.HashSet[string]]::new()
+        [void]$names.Add($r.Name)
+        foreach ($fi in (Get-ChildItem $watchDir -ErrorAction SilentlyContinue |
+                         Where-Object Extension -in @('.cmd', '.trig'))) {
+            [void]$names.Add($fi.Name)
+        }
+        foreach ($name in $names) {
+            $f = Join-Path $watchDir $name
+            try   { $content = (Get-Content $f -Raw -ErrorAction Stop).Trim() }
+            catch { continue }
+            Remove-Item $f -Force -ErrorAction SilentlyContinue
+            if ($name -match '^preload_(\d+)\.cmd$') {
+                $idx = [int]$Matches[1]
+                $p = New-Object System.Media.SoundPlayer $content
+                $p.Load()
+                $players[$idx] = $p
+            } elseif ($name -match '^play_(\d+)\.trig$') {
+                $idx = [int]$Matches[1]
+                if ($players.ContainsKey($idx)) { $players[$idx].Play() }
+            }
+        }
+    }
+}
+"""
+
+
+class _WinAudioServer:
+    """PowerShell FileSystemWatcher audio server for WSL2.
+
+    Watches a Windows-local temp dir for .trigger files written by Python.
+    SoundPlayer runs in a normal Windows process with full audio access.
     """
 
     def __init__(self):
-        self._proc = subprocess.Popen(
-            ["powershell.exe", "-NoProfile", "-Command", "-"],
-            stdin=subprocess.PIPE,
+        _TRIGGER_DIR.mkdir(parents=True, exist_ok=True)
+        script = _TRIGGER_DIR / "watcher.ps1"
+        script.write_text(_PS_WATCHER)
+        win_script = subprocess.check_output(
+            ["wslpath", "-w", str(script)], stderr=subprocess.DEVNULL
+        ).decode().strip()
+        win_watch = subprocess.check_output(
+            ["wslpath", "-w", str(_TRIGGER_DIR)], stderr=subprocess.DEVNULL
+        ).decode().strip()
+        subprocess.Popen(
+            ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
+             "-WindowStyle", "Hidden", "-File", win_script, "-watchDir", win_watch],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        self._lock = threading.Lock()
-        self._send("$__p = New-Object System.Collections.ArrayList")
 
-    def _send(self, cmd: str) -> None:
-        try:
-            with self._lock:
-                self._proc.stdin.write((cmd + "\n").encode("utf-8"))
-                self._proc.stdin.flush()
-        except Exception as e:
-            print(f"Audio server: {e}", file=sys.stderr)
+    def preload(self, pad_index: int, linux_path: str) -> None:
+        """Convert sample to 16-bit and pre-load it in the PS SoundPlayer."""
+        def _do():
+            try:
+                converted = _to_16bit(linux_path)
+                win = _linux_to_win(converted)
+                (_TRIGGER_DIR / f"preload_{pad_index}.cmd").write_text(win)
+            except Exception as e:
+                print(f"Preload: {e}", file=sys.stderr)
+        threading.Thread(target=_do, daemon=True).start()
 
-    def play(self, linux_path: str) -> None:
+    def play_pad(self, pad_index: int) -> None:
+        """Fire a pre-loaded pad — just a tiny file write, no subprocess."""
         try:
-            win = subprocess.check_output(
-                ["wslpath", "-w", linux_path], stderr=subprocess.DEVNULL
-            ).decode().strip()
-            escaped = win.replace("'", "''")
-            self._send(
-                f"$s = New-Object System.Media.SoundPlayer '{escaped}';"
-                f"$s.Load(); $s.Play(); [void]$__p.Add($s)"
-            )
+            (_TRIGGER_DIR / f"play_{pad_index}.trig").write_text(str(pad_index))
         except Exception as e:
             print(f"Audio: {e}", file=sys.stderr)
 
 
 _win_audio: _WinAudioServer | None = None
+_wav_16_cache: dict[str, str] = {}
+
+
+def _to_16bit(path: str) -> str:
+    """Return path to a 16-bit PCM copy of the WAV, converting lazily if needed.
+
+    System.Media.SoundPlayer only handles 8/16-bit PCM; 24-bit files play silently.
+    Converted files are cached in the same trigger dir to avoid repeated work.
+    """
+    if path in _wav_16_cache:
+        return _wav_16_cache[path]
+    with wave.open(path) as wf:
+        sw = wf.getsampwidth()
+        if sw == 2:
+            _wav_16_cache[path] = path
+            return path
+        ch, rate = wf.getnchannels(), wf.getframerate()
+        raw = wf.readframes(wf.getnframes())
+    shift = (sw - 2) * 8
+    buf = bytearray(len(raw) // sw * 2)
+    for i in range(0, len(raw), sw):
+        val = int.from_bytes(raw[i:i + sw], "little", signed=True) >> shift
+        struct.pack_into("<h", buf, i // sw * 2, max(-32768, min(32767, val)))
+    _TRIGGER_DIR.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(suffix=".wav", dir=str(_TRIGGER_DIR))
+    os.close(fd)
+    with wave.open(tmp, "w") as out:
+        out.setnchannels(ch)
+        out.setsampwidth(2)
+        out.setframerate(rate)
+        out.writeframes(bytes(buf))
+    _wav_16_cache[path] = tmp
+    return tmp
+
 
 def _get_win_audio() -> _WinAudioServer:
     global _win_audio
@@ -119,26 +226,63 @@ def _get_win_audio() -> _WinAudioServer:
 
 
 def play_wav(path: str) -> None:
-    if not _WSL and _AUDIO:
+    """Play a WAV file. Used on non-WSL platforms (Pi / Mac)."""
+    if _AUDIO:
         try:
             simpleaudio.WaveObject.from_wave_file(path).play()
             return
         except Exception:
             pass
-
-    if _WSL and shutil.which("powershell.exe"):
-        _get_win_audio().play(path)
-        return
-
-    # Native Linux / macOS fallback (non-blocking via thread)
     def _run():
-        if shutil.which("paplay"):
-            subprocess.run(["paplay", path], capture_output=True)
-        elif shutil.which("afplay"):
+        if shutil.which("afplay"):
             subprocess.run(["afplay", path], capture_output=True)
+        elif shutil.which("paplay"):
+            subprocess.run(["paplay", path], capture_output=True)
         else:
             print("Audio: no playback method available", file=sys.stderr)
     threading.Thread(target=_run, daemon=True).start()
+
+
+# ── Kit persistence ───────────────────────────────────────────────────────────
+
+def _kit_to_dict(kit: "Kit") -> dict:
+    return {"pads": kit.pads}
+
+def _dict_to_kit(kit: "Kit", data: dict) -> None:
+    pads = data.get("pads", [])
+    kit.pads = [(p if p and Path(p).exists() else None) for p in pads]
+    while len(kit.pads) < PAD_COUNT:
+        kit.pads.append(None)
+
+def _save_kit(kit: "Kit", path: str) -> None:
+    KITS_DIR.mkdir(exist_ok=True)
+    Path(path).write_text(json.dumps(_kit_to_dict(kit), indent=2))
+    _save_state(path)
+
+def _load_kit(kit: "Kit", path: str) -> None:
+    _dict_to_kit(kit, json.loads(Path(path).read_text()))
+
+def _save_state(kit_path: str) -> None:
+    try:
+        Path("state.json").write_text(json.dumps({"last_kit": kit_path}))
+    except Exception:
+        pass
+
+def _load_state(kit: "Kit") -> None:
+    try:
+        state = json.loads(Path("state.json").read_text())
+        last = state.get("last_kit")
+        if last and Path(last).exists():
+            _load_kit(kit, last)
+    except Exception:
+        pass
+
+def _preload_all(kit: "Kit") -> None:
+    if _WSL and shutil.which("powershell.exe"):
+        server = _get_win_audio()
+        for i, path in enumerate(kit.pads):
+            if path:
+                server.preload(i, path)
 
 
 # ── Shared kit state ──────────────────────────────────────────────────────────
@@ -169,6 +313,7 @@ class MainMenu(Screen):
         self._options = [
             ("PLAY",        lambda: PlayScreen(self.kit)),
             ("INSTRUMENTS", lambda: InstrumentsScreen(self.kit)),
+            ("KITS",        lambda: KitsScreen(self.kit)),
             ("LOOPER",      lambda: PlaceholderScreen("LOOPER")),
             ("SETTINGS",    lambda: PlaceholderScreen("SETTINGS")),
         ]
@@ -235,7 +380,13 @@ class PlayScreen(Screen):
     def _trigger(self, pad: int) -> None:
         self._triggered[pad] = time.monotonic()
         path = self.kit.pads[pad]
-        if path:
+        if not path:
+            return
+        if _WSL and shutil.which("powershell.exe"):
+            threading.Thread(
+                target=lambda: _get_win_audio().play_pad(pad), daemon=True
+            ).start()
+        else:
             play_wav(path)
 
     def draw(self, draw, font, small):
@@ -374,8 +525,81 @@ class PadAssignScreen(Screen):
             if self.cursor >= self.scroll + self.VISIBLE:
                 self.scroll = self.cursor - self.VISIBLE + 1
         elif key == "Return" and self.files:
-            self.kit.pads[self.pad_index] = str(self.files[self.cursor])
+            path = str(self.files[self.cursor])
+            self.kit.pads[self.pad_index] = path
+            if _WSL and shutil.which("powershell.exe"):
+                _get_win_audio().preload(self.pad_index, path)
             return "back"
+        return None
+
+
+# ── Kit browser ───────────────────────────────────────────────────────────────
+
+class KitsScreen(Screen):
+    VISIBLE = 5
+    _SAVE_LABEL = "[ Save current kit ]"
+
+    def __init__(self, kit: Kit):
+        self.kit = kit
+        self._refresh()
+        self.cursor = 0
+        self.scroll = 0
+
+    def _refresh(self) -> None:
+        self.files = sorted(KITS_DIR.glob("*.json")) if KITS_DIR.exists() else []
+
+    def _total(self) -> int:
+        return len(self.files) + 1  # slot 0 = save action
+
+    def draw(self, draw, font, small):
+        draw.text((centered_x(draw, "KITS", font), 8), "KITS", fill=FG, font=font)
+
+        items = [self._SAVE_LABEL] + [f.stem for f in self.files]
+        for rel, label in enumerate(items[self.scroll: self.scroll + self.VISIBLE]):
+            abs_idx = self.scroll + rel
+            selected = abs_idx == self.cursor
+            y = 38 + rel * 26
+            if selected:
+                bbox = draw.textbbox((0, 0), label, font=small)
+                h = bbox[3] - bbox[1]
+                draw.rectangle([5, y - 2, WIDTH - 5, y + h + 2], fill=HIGHLIGHT)
+                draw.text((10, y), label, fill=WHITE, font=small)
+            else:
+                draw.text((10, y), label, fill=FG if abs_idx > 0 else FG_DIM, font=small)
+
+        hint = "Enter=select  Bksp=back"
+        draw.text((centered_x(draw, hint, small), HEIGHT - 22), hint, fill=(75, 75, 75), font=small)
+
+    def handle_key(self, key):
+        total = self._total()
+        if key == "BackSpace":
+            return "back"
+        elif key == "Up":
+            self.cursor = max(0, self.cursor - 1)
+            if self.cursor < self.scroll:
+                self.scroll = self.cursor
+        elif key == "Down":
+            self.cursor = min(total - 1, self.cursor + 1)
+            if self.cursor >= self.scroll + self.VISIBLE:
+                self.scroll = self.cursor - self.VISIBLE + 1
+        elif key == "Return":
+            if self.cursor == 0:
+                existing = {f.stem for f in self.files}
+                n = 1
+                while f"kit_{n:03d}" in existing:
+                    n += 1
+                path = str(KITS_DIR / f"kit_{n:03d}.json")
+                _save_kit(self.kit, path)
+                self._refresh()
+                saved_idx = next((i for i, f in enumerate(self.files) if str(f) == path), None)
+                if saved_idx is not None:
+                    self.cursor = saved_idx + 1
+            else:
+                kit_path = str(self.files[self.cursor - 1])
+                _load_kit(self.kit, kit_path)
+                _save_state(kit_path)
+                threading.Thread(target=lambda: _preload_all(self.kit), daemon=True).start()
+                return "back"
         return None
 
 
@@ -394,12 +618,13 @@ class LCDEmulator:
         self.small = find_font(12)
 
         kit = Kit()
+        _load_state(kit)
         self.stack: list[Screen] = [MainMenu(kit)]
         self.tk_img   = None
         self.image_id = None
 
         if _WSL and shutil.which("powershell.exe"):
-            threading.Thread(target=_get_win_audio, daemon=True).start()
+            threading.Thread(target=lambda: _preload_all(kit), daemon=True).start()
 
         root.bind("<Key>", self._on_key)
         self._tick()
