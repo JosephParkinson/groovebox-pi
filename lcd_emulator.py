@@ -253,6 +253,23 @@ def _trigger_pad(pad: int, kit: "Kit") -> None:
         play_wav(path)
 
 
+# ── Settings ─────────────────────────────────────────────────────────────────
+
+class Settings:
+    QUANTIZE_OPTIONS = ("1/4", "1/8", "1/16", "1/32")
+    _BEATS = {"1/4": 1.0, "1/8": 0.5, "1/16": 0.25, "1/32": 0.125}
+
+    def __init__(self):
+        self.quantize = "1/16"
+
+    @property
+    def quantize_beats(self) -> float:
+        return self._BEATS[self.quantize]
+
+    def save(self) -> None:
+        _write_state({"quantize": self.quantize})
+
+
 # ── Kit persistence ───────────────────────────────────────────────────────────
 
 def _kit_to_dict(kit: "Kit") -> dict:
@@ -272,20 +289,34 @@ def _save_kit(kit: "Kit", path: str) -> None:
 def _load_kit(kit: "Kit", path: str) -> None:
     _dict_to_kit(kit, json.loads(Path(path).read_text()))
 
-def _save_state(kit_path: str) -> None:
+def _read_state() -> dict:
     try:
-        Path("state.json").write_text(json.dumps({"last_kit": kit_path}))
+        return json.loads(Path("state.json").read_text())
+    except Exception:
+        return {}
+
+def _write_state(patch: dict) -> None:
+    try:
+        data = _read_state()
+        data.update(patch)
+        Path("state.json").write_text(json.dumps(data, indent=2))
     except Exception:
         pass
 
-def _load_state(kit: "Kit") -> None:
-    try:
-        state = json.loads(Path("state.json").read_text())
-        last = state.get("last_kit")
-        if last and Path(last).exists():
+def _save_state(kit_path: str) -> None:
+    _write_state({"last_kit": kit_path})
+
+def _load_state(kit: "Kit", settings: "Settings") -> None:
+    data = _read_state()
+    last = data.get("last_kit")
+    if last and Path(last).exists():
+        try:
             _load_kit(kit, last)
-    except Exception:
-        pass
+        except Exception:
+            pass
+    q = data.get("quantize")
+    if q in Settings.QUANTIZE_OPTIONS:
+        settings.quantize = q
 
 def _preload_all(kit: "Kit") -> None:
     if _WSL and shutil.which("powershell.exe"):
@@ -342,8 +373,9 @@ class LoopChannel:
 class LoopEngine:
     _HAT_SLOT = 8        # virtual pad slot for count-in / metronome hat
 
-    def __init__(self, kit: Kit):
+    def __init__(self, kit: Kit, settings: Settings):
         self.kit        = kit
+        self.settings   = settings
         self.bpm        = 120.0
         self.metronome  = False
         self.channels   = [LoopChannel() for _ in range(4)]
@@ -539,9 +571,12 @@ class LoopEngine:
                         if i not in c._fired:
                             c._fired.add(i)
                             result.append(ev.pad)
-                # Transition RECORDING → PLAYING
+                # Transition RECORDING → PLAYING (apply quantisation)
                 if c.state == ChanState.RECORDING:
                     c.state = ChanState.PLAYING
+                    grid = self.settings.quantize_beats
+                    for ev in c.events:
+                        ev.beat = round(ev.beat / grid) * grid % c.beats
                     c.events.sort(key=lambda e: e.beat)
                 c._fired = set()
 
@@ -569,16 +604,17 @@ class Screen(ABC):
 # ── Main menu ─────────────────────────────────────────────────────────────────
 
 class MainMenu(Screen):
-    def __init__(self, kit: Kit, engine: "LoopEngine"):
-        self.kit    = kit
-        self.engine = engine
+    def __init__(self, kit: Kit, engine: "LoopEngine", settings: "Settings"):
+        self.kit      = kit
+        self.engine   = engine
+        self.settings = settings
         self.selected = 0
         self._options = [
             ("PLAY",        lambda: PlayScreen(self.kit)),
             ("INSTRUMENTS", lambda: InstrumentsScreen(self.kit)),
             ("KITS",        lambda: KitsScreen(self.kit)),
             ("LOOPER",      lambda: LooperScreen(self.kit, self.engine)),
-            ("SETTINGS",    lambda: PlaceholderScreen("SETTINGS")),
+            ("SETTINGS",    lambda: SettingsScreen(self.settings)),
         ]
 
     def draw(self, draw, font, small):
@@ -858,6 +894,53 @@ class KitsScreen(Screen):
         return None
 
 
+# ── Settings screen ──────────────────────────────────────────────────────────
+
+class SettingsScreen(Screen):
+    _ROWS = [
+        ("Quantize", "quantize", Settings.QUANTIZE_OPTIONS),
+    ]
+
+    def __init__(self, settings: Settings):
+        self.settings = settings
+        self.cursor   = 0
+
+    def draw(self, draw, font, small):
+        draw.text((centered_x(draw, "SETTINGS", font), 8), "SETTINGS", fill=FG, font=font)
+
+        for i, (label, attr, opts) in enumerate(self._ROWS):
+            y   = 60 + i * 36
+            val = getattr(self.settings, attr)
+            sel = i == self.cursor
+
+            if sel:
+                draw.rectangle([5, y - 4, WIDTH - 5, y + 22], fill=HIGHLIGHT)
+            draw.text((14, y), label, fill=WHITE if sel else FG, font=small)
+
+            vtxt = f"< {val} >" if sel else val
+            vb   = draw.textbbox((0, 0), vtxt, font=font)
+            draw.text((WIDTH - vb[2] - 12, y - 3), vtxt,
+                      fill=WHITE if sel else FG, font=font)
+
+        hint = "←/→:change  Bksp:back"
+        draw.text((centered_x(draw, hint, small), HEIGHT - 22), hint, fill=(75, 75, 75), font=small)
+
+    def handle_key(self, key):
+        if key == "BackSpace":
+            return "back"
+        elif key == "Up":
+            self.cursor = max(0, self.cursor - 1)
+        elif key == "Down":
+            self.cursor = min(len(self._ROWS) - 1, self.cursor + 1)
+        elif key in ("Left", "Right"):
+            label, attr, opts = self._ROWS[self.cursor]
+            val = getattr(self.settings, attr)
+            idx = list(opts).index(val) if val in opts else 0
+            setattr(self.settings, attr, opts[(idx + (1 if key == "Right" else -1)) % len(opts)])
+            self.settings.save()
+        return None
+
+
 # ── Looper screen ────────────────────────────────────────────────────────────
 
 _RED  = (200,  40,  40)
@@ -1001,10 +1084,11 @@ class LCDEmulator:
         self.font  = find_font(16)
         self.small = find_font(12)
 
-        kit    = Kit()
-        _load_state(kit)
-        engine = LoopEngine(kit)
-        self.stack: list[Screen] = [MainMenu(kit, engine)]
+        settings = Settings()
+        kit      = Kit()
+        _load_state(kit, settings)
+        engine   = LoopEngine(kit, settings)
+        self.stack: list[Screen] = [MainMenu(kit, engine, settings)]
         self.tk_img   = None
         self.image_id = None
 
