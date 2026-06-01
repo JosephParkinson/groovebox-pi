@@ -243,6 +243,16 @@ def play_wav(path: str) -> None:
     threading.Thread(target=_run, daemon=True).start()
 
 
+def _trigger_pad(pad: int, kit: "Kit") -> None:
+    path = kit.pads[pad]
+    if not path:
+        return
+    if _WSL and shutil.which("powershell.exe"):
+        threading.Thread(target=lambda: _get_win_audio().play_pad(pad), daemon=True).start()
+    else:
+        play_wav(path)
+
+
 # ── Kit persistence ───────────────────────────────────────────────────────────
 
 def _kit_to_dict(kit: "Kit") -> dict:
@@ -292,6 +302,218 @@ class Kit:
         self.pads: list[str | None] = [None] * PAD_COUNT
 
 
+# ── Looper engine ────────────────────────────────────────────────────────────
+
+class ChanState:
+    EMPTY     = "empty"
+    PRIMED    = "primed"
+    COUNTING  = "counting"   # first channel, waiting out count-in
+    RECORDING = "recording"
+    PLAYING   = "playing"
+
+
+class LoopEvent:
+    __slots__ = ("beat", "pad")
+    def __init__(self, beat: float, pad: int):
+        self.beat = beat
+        self.pad  = pad
+
+
+class LoopChannel:
+    def __init__(self):
+        self.state:  str       = ChanState.EMPTY
+        self.events: list      = []
+        self._fired: set[int]  = set()
+
+    def reset(self) -> None:
+        self.state  = ChanState.EMPTY
+        self.events = []
+        self._fired = set()
+
+
+class LoopEngine:
+    BEATS = 16           # 4 bars × 4 beats/bar
+    _HAT_SLOT = 8        # virtual pad slot (outside 0-7 kit pads)
+
+    def __init__(self, kit: Kit):
+        self.kit      = kit
+        self.bpm      = 120.0
+        self.channels = [LoopChannel() for _ in range(4)]
+        self._phase   = "idle"   # "idle" | "count_in" | "running"
+        self._t0      = 0.0
+        self._ci_start = 0.0
+        self._ci_beat  = -1
+        self._hat_path: str | None = None
+        self._lock     = threading.Lock()
+        self._find_and_preload_hat()
+        threading.Thread(target=self._run, daemon=True).start()
+
+    # ── Properties ────────────────────────────────────────────────────────────
+
+    @property
+    def beat_dur(self) -> float:
+        return 60.0 / self.bpm
+
+    @property
+    def loop_dur(self) -> float:
+        return self.BEATS * self.beat_dur
+
+    # ── Public API (called from UI thread) ────────────────────────────────────
+
+    def prime(self, ch: int) -> None:
+        with self._lock:
+            c = self.channels[ch]
+            if c.state != ChanState.EMPTY:
+                return
+            if self._phase == "idle":
+                c.state        = ChanState.COUNTING
+                self._phase    = "count_in"
+                self._ci_start = time.monotonic()
+                self._ci_beat  = -1
+            else:
+                c.state = ChanState.PRIMED
+
+    def note(self, pad: int) -> None:
+        """Play a pad hit and record it if any channel is recording."""
+        _trigger_pad(pad, self.kit)
+        with self._lock:
+            if self._phase != "running":
+                return
+            beat = (time.monotonic() - self._t0) / self.beat_dur % self.BEATS
+            for c in self.channels:
+                if c.state == ChanState.RECORDING:
+                    c.events.append(LoopEvent(beat, pad))
+
+    def stop(self) -> None:
+        with self._lock:
+            self._phase = "idle"
+            for c in self.channels:
+                c.reset()
+
+    def loop_pos(self) -> float | None:
+        """0.0–1.0 through the current loop cycle, or None if not running."""
+        if self._phase != "running":
+            return None
+        return ((time.monotonic() - self._t0) / self.beat_dur % self.BEATS) / self.BEATS
+
+    def count_beat(self) -> int | None:
+        """0-3 during count-in, None otherwise."""
+        if self._phase != "count_in":
+            return None
+        return min(3, int((time.monotonic() - self._ci_start) / self.beat_dur))
+
+    # ── Hat sample ────────────────────────────────────────────────────────────
+
+    def _find_hat(self) -> str | None:
+        samples = Path("samples")
+        if not samples.exists():
+            return None
+        candidates = sorted(f for f in samples.glob("*.wav") if "hat" in f.name.lower())
+        for f in candidates:
+            if any(x in f.name.lower() for x in ("cl", "closed", "03")):
+                return str(f)
+        return str(candidates[0]) if candidates else None
+
+    def _find_and_preload_hat(self) -> None:
+        self._hat_path = self._find_hat()
+        if self._hat_path and _WSL and shutil.which("powershell.exe"):
+            threading.Thread(
+                target=lambda: _get_win_audio().preload(self._HAT_SLOT, self._hat_path),
+                daemon=True,
+            ).start()
+
+    def _play_hat(self) -> None:
+        if not self._hat_path:
+            return
+        if _WSL and shutil.which("powershell.exe"):
+            _get_win_audio().play_pad(self._HAT_SLOT)
+        else:
+            play_wav(self._hat_path)
+
+    # ── Background timing thread ──────────────────────────────────────────────
+
+    def _run(self) -> None:
+        last = time.monotonic()
+        while True:
+            time.sleep(0.004)
+            now = time.monotonic()
+            to_play: list[int | str] = []  # pad indices or "hat"
+            with self._lock:
+                if self._phase == "count_in":
+                    to_play = self._tick_count_in(now)
+                elif self._phase == "running":
+                    to_play = self._tick_running(now, last)
+            for item in to_play:
+                if item == "hat":
+                    threading.Thread(target=self._play_hat, daemon=True).start()
+                else:
+                    p = item
+                    threading.Thread(
+                        target=lambda x=p: _trigger_pad(x, self.kit), daemon=True
+                    ).start()
+            last = now
+
+    def _tick_count_in(self, now: float) -> list:
+        elapsed = now - self._ci_start
+        b = int(elapsed / self.beat_dur)
+        result = []
+        if b != self._ci_beat and b < 4:
+            self._ci_beat = b
+            result.append("hat")
+        if elapsed >= 4 * self.beat_dur:
+            self._t0    = self._ci_start + 4 * self.beat_dur
+            self._phase = "running"
+            for c in self.channels:
+                if c.state in (ChanState.COUNTING, ChanState.PRIMED):
+                    c.state  = ChanState.RECORDING
+                    c.events = []
+                    c._fired = set()
+        return result
+
+    def _tick_running(self, now: float, last: float) -> list:
+        t0 = self._t0
+        bd = self.beat_dur
+        N  = self.BEATS
+
+        old_abs = max(0.0, last - t0) / bd
+        new_abs = (now - t0) / bd
+        old_cycle = int(old_abs / N)
+        new_cycle = int(new_abs / N)
+        wrapped   = new_cycle > old_cycle
+
+        new_pos = new_abs % N
+        result  = []
+
+        if wrapped:
+            # Fire any events that landed in the tail of the previous cycle
+            for c in self.channels:
+                if c.state == ChanState.PLAYING:
+                    for i, ev in enumerate(c.events):
+                        if i not in c._fired:
+                            c._fired.add(i)
+                            result.append(ev.pad)
+            # Cycle boundary transitions
+            for c in self.channels:
+                if c.state == ChanState.RECORDING:
+                    c.state = ChanState.PLAYING
+                    c.events.sort(key=lambda e: e.beat)
+                elif c.state == ChanState.PRIMED:
+                    c.state  = ChanState.RECORDING
+                    c.events = []
+                c._fired = set()
+
+        # Fire events in current cycle up to new_pos
+        for c in self.channels:
+            if c.state != ChanState.PLAYING:
+                continue
+            for i, ev in enumerate(c.events):
+                if i not in c._fired and ev.beat <= new_pos:
+                    c._fired.add(i)
+                    result.append(ev.pad)
+
+        return result
+
+
 # ── Screen base ───────────────────────────────────────────────────────────────
 
 class Screen(ABC):
@@ -307,14 +529,15 @@ class Screen(ABC):
 # ── Main menu ─────────────────────────────────────────────────────────────────
 
 class MainMenu(Screen):
-    def __init__(self, kit: Kit):
-        self.kit = kit
+    def __init__(self, kit: Kit, engine: "LoopEngine"):
+        self.kit    = kit
+        self.engine = engine
         self.selected = 0
         self._options = [
             ("PLAY",        lambda: PlayScreen(self.kit)),
             ("INSTRUMENTS", lambda: InstrumentsScreen(self.kit)),
             ("KITS",        lambda: KitsScreen(self.kit)),
-            ("LOOPER",      lambda: PlaceholderScreen("LOOPER")),
+            ("LOOPER",      lambda: LooperScreen(self.kit, self.engine)),
             ("SETTINGS",    lambda: PlaceholderScreen("SETTINGS")),
         ]
 
@@ -379,15 +602,7 @@ class PlayScreen(Screen):
 
     def _trigger(self, pad: int) -> None:
         self._triggered[pad] = time.monotonic()
-        path = self.kit.pads[pad]
-        if not path:
-            return
-        if _WSL and shutil.which("powershell.exe"):
-            threading.Thread(
-                target=lambda: _get_win_audio().play_pad(pad), daemon=True
-            ).start()
-        else:
-            play_wav(path)
+        _trigger_pad(pad, self.kit)
 
     def draw(self, draw, font, small):
         title = "PLAY"
@@ -603,6 +818,119 @@ class KitsScreen(Screen):
         return None
 
 
+# ── Looper screen ────────────────────────────────────────────────────────────
+
+_RED  = (200,  40,  40)
+_AMBER = (180, 140,   0)
+
+class LooperScreen(Screen):
+    _KEY_MAP: dict[str, int] = {
+        **{k.lower(): i     for i, k in enumerate("QWER")},
+        **{k.lower(): i + 4 for i, k in enumerate("ASDF")},
+    }
+    _BAR_X  = 22
+    _BAR_W  = 156
+    _BAR_H  = 14
+    _ROW_Y  = [48, 72, 96, 120]   # y-top of each channel row
+
+    def __init__(self, kit: Kit, engine: LoopEngine):
+        self.kit    = kit
+        self.engine = engine
+
+    # ── Drawing ───────────────────────────────────────────────────────────────
+
+    def draw(self, draw, font, small):
+        # Title + BPM
+        draw.text((6, 6), "LOOPER", fill=FG, font=font)
+        bpm_txt = str(int(self.engine.bpm))
+        bx = draw.textbbox((0, 0), bpm_txt, font=font)
+        draw.text((WIDTH - bx[2] - 6, 6), bpm_txt, fill=FG, font=font)
+
+        # Global position / count-in bar
+        self._draw_pos_bar(draw)
+
+        # Four channel rows
+        for i, y in enumerate(self._ROW_Y):
+            self._draw_channel(draw, small, i, y)
+
+        hint = "1-4:arm  -/=:bpm  r:stop  Bksp:back"
+        draw.text((centered_x(draw, hint, small), HEIGHT - 22), hint, fill=(75, 75, 75), font=small)
+
+    def _draw_pos_bar(self, draw) -> None:
+        bx, by, bw, bh = 4, 28, WIDTH - 8, 8
+        draw.rectangle([bx, by, bx + bw, by + bh], outline=FG_DIM)
+
+        cb = self.engine.count_beat()
+        lp = self.engine.loop_pos()
+        if cb is not None:
+            sw = bw // 4
+            for i in range(4):
+                if i <= cb:
+                    draw.rectangle([bx + i * sw, by, bx + (i + 1) * sw, by + bh], fill=_AMBER)
+        elif lp is not None:
+            fw = int(lp * bw)
+            if fw > 0:
+                draw.rectangle([bx, by, bx + fw, by + bh], fill=HIGHLIGHT)
+
+    def _draw_channel(self, draw, small, idx: int, y: int) -> None:
+        ch     = self.engine.channels[idx]
+        state  = ch.state
+        bx, bw, bh = self._BAR_X, self._BAR_W, self._BAR_H
+
+        state_cfg = {
+            ChanState.EMPTY:     ("—",    FG_DIM,  None,      None),
+            ChanState.PRIMED:    ("WAIT", _AMBER,  None,      _AMBER),
+            ChanState.COUNTING:  ("CNT",  _AMBER,  None,      _AMBER),
+            ChanState.RECORDING: ("REC",  _RED,    _RED,      _RED),
+            ChanState.PLAYING:   ("PLAY", GREEN,   GREEN,     GREEN),
+        }
+        label, lbl_col, fill_col, border_col = state_cfg.get(
+            state, ("?", FG_DIM, None, FG_DIM)
+        )
+
+        # Channel number label
+        draw.text((6, y + 1), str(idx + 1), fill=lbl_col, font=small)
+
+        # Progress bar background
+        if border_col:
+            draw.rectangle([bx, y, bx + bw, y + bh], outline=border_col)
+        else:
+            draw.rectangle([bx, y, bx + bw, y + bh], outline=FG_DIM)
+
+        # Progress fill
+        pos = self.engine.loop_pos()
+        if pos is not None and fill_col:
+            fw = int(pos * bw)
+            if state == ChanState.PLAYING:
+                # Full green bar + white playback cursor
+                draw.rectangle([bx, y, bx + bw, y + bh], fill=fill_col)
+                cx = bx + fw
+                draw.line([(cx, y), (cx, y + bh)], fill=WHITE, width=2)
+            elif state == ChanState.RECORDING and fw > 0:
+                draw.rectangle([bx, y, bx + fw, y + bh], fill=fill_col)
+
+        # State label
+        draw.text((WIDTH - 56, y + 1), label, fill=lbl_col, font=small)
+
+    # ── Input ─────────────────────────────────────────────────────────────────
+
+    def handle_key(self, key):
+        k = key.lower()
+        if key == "BackSpace":
+            return "back"
+        elif key == "r":
+            self.engine.stop()
+        elif key == "minus":
+            self.engine.bpm = max(40.0, self.engine.bpm - 1)
+        elif key == "equal":
+            self.engine.bpm = min(300.0, self.engine.bpm + 1)
+        elif key in "1234":
+            self.engine.prime(int(key) - 1)
+        elif k in self._KEY_MAP:
+            self.engine.note(self._KEY_MAP[k])
+        return None
+
+
 # ── Emulator window ───────────────────────────────────────────────────────────
 
 class LCDEmulator:
@@ -617,9 +945,10 @@ class LCDEmulator:
         self.font  = find_font(16)
         self.small = find_font(12)
 
-        kit = Kit()
+        kit    = Kit()
         _load_state(kit)
-        self.stack: list[Screen] = [MainMenu(kit)]
+        engine = LoopEngine(kit)
+        self.stack: list[Screen] = [MainMenu(kit, engine)]
         self.tk_img   = None
         self.image_id = None
 
