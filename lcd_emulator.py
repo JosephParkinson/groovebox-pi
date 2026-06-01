@@ -260,14 +260,15 @@ class Settings:
     _BEATS = {"1/4": 1.0, "1/8": 0.5, "1/16": 0.25, "1/32": 0.125}
 
     def __init__(self):
-        self.quantize = "1/16"
+        self.quantize          = "1/16"
+        self.metronome_sample  = "(auto)"   # "(auto)" or an absolute sample path
 
     @property
     def quantize_beats(self) -> float:
         return self._BEATS[self.quantize]
 
     def save(self) -> None:
-        _write_state({"quantize": self.quantize})
+        _write_state({"quantize": self.quantize, "metronome_sample": self.metronome_sample})
 
 
 # ── Kit persistence ───────────────────────────────────────────────────────────
@@ -317,6 +318,9 @@ def _load_state(kit: "Kit", settings: "Settings") -> None:
     q = data.get("quantize")
     if q in Settings.QUANTIZE_OPTIONS:
         settings.quantize = q
+    ms = data.get("metronome_sample", "(auto)")
+    if ms == "(auto)" or (isinstance(ms, str) and Path(ms).exists()):
+        settings.metronome_sample = ms
 
 def _preload_all(kit: "Kit") -> None:
     if _WSL and shutil.which("powershell.exe"):
@@ -383,9 +387,10 @@ class LoopEngine:
         self._t0        = 0.0
         self._ci_start  = 0.0
         self._ci_beat   = -1
-        self._hat_path: str | None = None
-        self._lock      = threading.Lock()
-        self._find_and_preload_hat()
+        self._hat_path:    str | None = None
+        self._hat_setting: str        = ""   # sentinel — forces resolve on first call
+        self._lock = threading.Lock()
+        threading.Thread(target=self._get_hat_path, daemon=True).start()  # warm up
         threading.Thread(target=self._run, daemon=True).start()
 
     # ── Properties ────────────────────────────────────────────────────────────
@@ -467,7 +472,7 @@ class LoopEngine:
 
     # ── Hat sample ────────────────────────────────────────────────────────────
 
-    def _find_hat(self) -> str | None:
+    def _auto_hat(self) -> str | None:
         samples = Path("samples")
         if not samples.exists():
             return None
@@ -477,21 +482,32 @@ class LoopEngine:
                 return str(f)
         return str(candidates[0]) if candidates else None
 
-    def _find_and_preload_hat(self) -> None:
-        self._hat_path = self._find_hat()
+    def _get_hat_path(self) -> str | None:
+        """Lazily resolve (and re-preload on WSL) whenever the setting changes."""
+        ms = self.settings.metronome_sample
+        if ms == self._hat_setting:
+            return self._hat_path
+        self._hat_setting = ms
+        if ms and ms != "(auto)" and Path(ms).exists():
+            self._hat_path = ms
+        else:
+            self._hat_path = self._auto_hat()
         if self._hat_path and _WSL and shutil.which("powershell.exe"):
+            path = self._hat_path
             threading.Thread(
-                target=lambda: _get_win_audio().preload(self._HAT_SLOT, self._hat_path),
+                target=lambda: _get_win_audio().preload(self._HAT_SLOT, path),
                 daemon=True,
             ).start()
+        return self._hat_path
 
     def _play_hat(self) -> None:
-        if not self._hat_path:
+        path = self._get_hat_path()
+        if not path:
             return
         if _WSL and shutil.which("powershell.exe"):
             _get_win_audio().play_pad(self._HAT_SLOT)
         else:
-            play_wav(self._hat_path)
+            play_wav(path)
 
     # ── Background timing thread ──────────────────────────────────────────────
 
@@ -897,18 +913,23 @@ class KitsScreen(Screen):
 # ── Settings screen ──────────────────────────────────────────────────────────
 
 class SettingsScreen(Screen):
-    _ROWS = [
-        ("Quantize", "quantize", Settings.QUANTIZE_OPTIONS),
-    ]
-
     def __init__(self, settings: Settings):
         self.settings = settings
         self.cursor   = 0
+        # Each row: (label, attr, options_tuple, display_fn)
+        wav_opts = ("(auto)",) + tuple(
+            str(f) for f in sorted(Path("samples").glob("*.wav"))
+        ) if Path("samples").exists() else ("(auto)",)
+        self._rows = [
+            ("Quantize", "quantize",         Settings.QUANTIZE_OPTIONS, lambda v: v),
+            ("Metro",    "metronome_sample",  wav_opts,
+             lambda v: "(auto)" if v == "(auto)" else Path(v).stem[:14]),
+        ]
 
     def draw(self, draw, font, small):
         draw.text((centered_x(draw, "SETTINGS", font), 8), "SETTINGS", fill=FG, font=font)
 
-        for i, (label, attr, opts) in enumerate(self._ROWS):
+        for i, (label, attr, opts, display_fn) in enumerate(self._rows):
             y   = 60 + i * 36
             val = getattr(self.settings, attr)
             sel = i == self.cursor
@@ -917,12 +938,13 @@ class SettingsScreen(Screen):
                 draw.rectangle([5, y - 4, WIDTH - 5, y + 22], fill=HIGHLIGHT)
             draw.text((14, y), label, fill=WHITE if sel else FG, font=small)
 
-            vtxt = f"< {val} >" if sel else val
+            disp = display_fn(val)
+            vtxt = f"< {disp} >" if sel else disp
             vb   = draw.textbbox((0, 0), vtxt, font=font)
             draw.text((WIDTH - vb[2] - 12, y - 3), vtxt,
                       fill=WHITE if sel else FG, font=font)
 
-        hint = "←/→:change  Bksp:back"
+        hint = "↑↓:row  ←/→:change  Bksp:back"
         draw.text((centered_x(draw, hint, small), HEIGHT - 22), hint, fill=(75, 75, 75), font=small)
 
     def handle_key(self, key):
@@ -931,9 +953,9 @@ class SettingsScreen(Screen):
         elif key == "Up":
             self.cursor = max(0, self.cursor - 1)
         elif key == "Down":
-            self.cursor = min(len(self._ROWS) - 1, self.cursor + 1)
+            self.cursor = min(len(self._rows) - 1, self.cursor + 1)
         elif key in ("Left", "Right"):
-            label, attr, opts = self._ROWS[self.cursor]
+            label, attr, opts, _ = self._rows[self.cursor]
             val = getattr(self.settings, attr)
             idx = list(opts).index(val) if val in opts else 0
             setattr(self.settings, attr, opts[(idx + (1 if key == "Right" else -1)) % len(opts)])
