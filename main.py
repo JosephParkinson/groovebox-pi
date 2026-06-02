@@ -63,8 +63,8 @@ def _has_display() -> bool:
 
 def _build_app_state():
     """Create all shared model objects and configure audio before the stream opens."""
-    font  = find_font(16)
-    small = find_font(12)
+    font  = find_font(20)
+    small = find_font(16)
     settings = Settings()
     kit      = Kit()
     _load_state(kit, settings)
@@ -79,7 +79,14 @@ def _build_app_state():
 
 def _start_audio(kit):
     if _AUDIO and not _WSL:
-        _get_stream_mixer()
+        for attempt in range(5):
+            try:
+                _get_stream_mixer()
+                break
+            except Exception as exc:
+                print(f"[audio] init attempt {attempt + 1} failed: {exc}", file=sys.stderr)
+                if attempt < 4:
+                    time.sleep(1)
     threading.Thread(target=lambda: _preload_all(kit), daemon=True).start()
 
 
@@ -239,6 +246,8 @@ class Groovebox:
 
 def run_headless() -> None:
     print("[headless] Starting without display server.", file=sys.stderr)
+    # Brief pause so the SPI/I2S subsystem finishes initialising after boot
+    time.sleep(2)
 
     if not init_display():
         print("[headless] ST7789 LCD not available — nothing to display. Exiting.",

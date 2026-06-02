@@ -32,15 +32,15 @@ _STYLE = {
 # Global position strip (thin bar above the channel bars)
 _PS_X0 = 4
 _PS_X1 = WIDTH - 4
-_PS_Y  = 22   # top edge
+_PS_Y  = 12   # top edge (moved down slightly to leave room for BPM text)
 _PS_H  = 4    # height in px
 
 # Bar geometry — 4 bars below the position strip
 _BX0 = 3
 _BX1 = WIDTH - 3
-_BY0 = 30    # top of first bar (leaves a 4px gap after the position strip)
-_BH  = 48    # bar height (px)
-_GAP = 5     # gap between bars
+_BY0 = 16    # top of first bar (immediately after strip)
+_BH  = 53    # bar height (px)
+_GAP = 4     # gap between bars
 
 
 def _bar_y(idx: int) -> tuple[int, int]:
@@ -72,12 +72,11 @@ class LooperScreen(Screen):
     # ── Drawing ───────────────────────────────────────────────────────────────
 
     def draw(self, draw, font, small):
-        # Title row: label left, metronome + BPM right
-        draw.text((6, 4), "PLAY", fill=FG, font=font)
+        # Top strip (y=0..11): metronome symbol left, BPM right
         met_sym = "●" if self.engine.metronome else "○"
         bpm_txt = f"{met_sym} {int(self.engine.bpm)}"
         bb = draw.textbbox((0, 0), bpm_txt, font=small)
-        draw.text((WIDTH - bb[2] - 6, 8), bpm_txt,
+        draw.text((WIDTH - bb[2] - 6, 1), bpm_txt,
                   fill=HIGHLIGHT if self.engine.metronome else FG_DIM, font=small)
 
         self._draw_pos_strip(draw)
@@ -234,13 +233,15 @@ class LooperScreen(Screen):
             self.engine.metronome = not self.engine.metronome
         elif key == "x":
             self.engine.toggle_mute(self.cursor)
-        elif key == "o":
-            self.engine.cycle_rec_mode(self.cursor)   # loop → overdub → one_shot (→ loop)
-        elif key == "l":
+        elif key == "Return":
             c = self.engine.channels[self.cursor]
             if c.state == ChanState.EMPTY:
                 from .seq_picker_screen import SeqPickerScreen
                 return SeqPickerScreen(self.engine, self.cursor)
+            else:
+                self.engine.toggle_mute(self.cursor)
+        elif key == "o":
+            self.engine.cycle_rec_mode(self.cursor)   # loop → overdub → one_shot (→ loop)
         elif key in ("minus", "-"):
             self.engine.bpm = max(40.0, self.engine.bpm - 1)
         elif key in ("equal", "="):

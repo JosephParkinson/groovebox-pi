@@ -4,6 +4,8 @@ from ..constants import FG, FG_DIM, HIGHLIGHT, WHITE, WIDTH, HEIGHT
 from ..settings import Settings
 from .base import Screen, centered_x
 
+_ROW_H = 60   # 4 rows × 60px = 240px
+
 
 class SettingsScreen(Screen):
     def __init__(self, settings: Settings):
@@ -25,33 +27,45 @@ class SettingsScreen(Screen):
         self._debug_idx = len(self._rows)
 
     def draw(self, draw, font, small):
-        draw.text((centered_x(draw, "SETTINGS", font), 8), "SETTINGS", fill=FG, font=font)
+        font_h = draw.textbbox((0, 0), "A", font=font)[3]
 
         for i, (label, attr, opts, display_fn) in enumerate(self._rows):
-            y   = 50 + i * 36
-            val = getattr(self.settings, attr)
-            sel = i == self.cursor
+            row_y = i * _ROW_H
+            sel   = i == self.cursor
+            val   = getattr(self.settings, attr)
+            disp  = display_fn(val)
 
             if sel:
-                draw.rectangle([5, y - 4, WIDTH - 5, y + 22], fill=HIGHLIGHT)
-            draw.text((14, y), label, fill=WHITE if sel else FG, font=small)
+                draw.rectangle([0, row_y, WIDTH - 1, row_y + _ROW_H - 1], fill=HIGHLIGHT)
+                txt_col = WHITE
+            else:
+                draw.rectangle([0, row_y, WIDTH - 1, row_y + _ROW_H - 1], fill=(20, 20, 20))
+                txt_col = FG
 
-            disp = display_fn(val)
+            cy = row_y + (_ROW_H - font_h) // 2
+            draw.text((12, cy), label, fill=txt_col, font=font)
+
             vtxt = f"< {disp} >" if sel else disp
             vb   = draw.textbbox((0, 0), vtxt, font=font)
-            draw.text((WIDTH - vb[2] - 12, y - 3), vtxt,
-                      fill=WHITE if sel else FG, font=font)
+            draw.text((WIDTH - vb[2] - 12, cy), vtxt, fill=txt_col, font=font)
+            draw.line([(0, row_y + _ROW_H - 1), (WIDTH - 1, row_y + _ROW_H - 1)],
+                      fill=(40, 40, 40))
 
-        # Debug action row
-        debug_y  = 50 + len(self._rows) * 36
+        # Debug row (row 3, y=180..239)
+        debug_y   = self._debug_idx * _ROW_H
         debug_sel = self.cursor == self._debug_idx
         if debug_sel:
-            draw.rectangle([5, debug_y - 4, WIDTH - 5, debug_y + 22], fill=HIGHLIGHT)
-        draw.text((14, debug_y), "Debug", fill=WHITE if debug_sel else FG_DIM, font=small)
-        draw.text((WIDTH - 40, debug_y), "→", fill=WHITE if debug_sel else FG_DIM, font=font)
+            draw.rectangle([0, debug_y, WIDTH - 1, debug_y + _ROW_H - 1], fill=HIGHLIGHT)
+            debug_col = WHITE
+        else:
+            draw.rectangle([0, debug_y, WIDTH - 1, debug_y + _ROW_H - 1], fill=(20, 20, 20))
+            debug_col = FG_DIM
 
-        hint = "↑↓:row  ←/→:change  Enter:open  Bksp:back"
-        draw.text((centered_x(draw, hint, small), HEIGHT - 22), hint, fill=(75, 75, 75), font=small)
+        cy = debug_y + (_ROW_H - font_h) // 2
+        draw.text((12, cy), "Debug", fill=debug_col, font=font)
+        draw.text((WIDTH - 30, cy), "→", fill=debug_col, font=font)
+        draw.line([(0, debug_y + _ROW_H - 1), (WIDTH - 1, debug_y + _ROW_H - 1)],
+                  fill=(40, 40, 40))
 
     def handle_key(self, key):
         total = self._debug_idx + 1

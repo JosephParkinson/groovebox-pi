@@ -8,13 +8,13 @@ from .base import Screen, NameInputScreen, centered_x
 _PAD_LABELS = "QWERASDF"
 
 # Grid geometry
-_LABEL_W = 12   # px reserved for the pad letter on the left
+_LABEL_W = 16   # px reserved for the pad letter on the left (widened for 16px font)
 _STEP_W  = 14   # px per step column (13 content + 1 gap)
-_ROW_H   = 21   # px per pad row   (20 content + 1 gap)
+_ROW_H   = 25   # px per pad row   (taller rows — no title above)
 _GRID_X  = _LABEL_W                      # x where step columns begin
-_GRID_Y  = 22                            # y where rows begin (below title)
+_GRID_Y  = 14                            # y where rows begin (below thin header strip)
 _GRID_W  = Sequencer.STEPS * _STEP_W    # 224 px
-_GRID_H  = Sequencer.PADS  * _ROW_H     # 168 px
+_GRID_H  = Sequencer.PADS  * _ROW_H     # 200 px
 
 # Colours
 _CURSOR_FILL   = (0,  35,  90)
@@ -43,14 +43,14 @@ class SequencerScreen(Screen):
         playing  = self.seq.is_running()
         cur_step = self.seq.current_step()
 
-        # Title row: name on the left, play indicator + BPM on the right
+        # Header strip (y=0..13): name left, play indicator + BPM right
         name_disp = (self.seq.name[:10] + "…") if len(self.seq.name) > 10 else self.seq.name
-        draw.text((4, 4), name_disp, fill=FG, font=font)
+        draw.text((4, 1), name_disp, fill=FG, font=small)
         indicator = ">" if playing else "."
-        bpm_txt   = f"{indicator} {int(self.seq.bpm)}"
+        bpm_txt   = f"{indicator} {int(self.seq.bpm)}bpm"
         bx = draw.textbbox((0, 0), bpm_txt, font=small)
-        draw.text((WIDTH - bx[2] - 4, 8), bpm_txt,
-                  fill=GREEN if playing else FG, font=small)
+        draw.text((WIDTH - bx[2] - 4, 1), bpm_txt,
+                  fill=GREEN if playing else FG_DIM, font=small)
 
         # Beat dividers
         for beat in range(1, 4):
@@ -86,11 +86,6 @@ class SequencerScreen(Screen):
                 if active and is_cursor:
                     draw.rectangle([x0, y0, x1, y1], outline=_CURSOR_EDGE)
 
-        # Two-line hint
-        hint1 = "Q-F:tog  </>:step  spc:play  -=:bpm"
-        hint2 = "s:save  l:load  n:name  bksp:back"
-        draw.text((centered_x(draw, hint1, small), HEIGHT - 26), hint1, fill=(65, 65, 65), font=small)
-        draw.text((centered_x(draw, hint2, small), HEIGHT - 13), hint2, fill=(65, 65, 65), font=small)
 
     # ── Input ────────────────────────────────────────────────────────────────
 
@@ -101,6 +96,8 @@ class SequencerScreen(Screen):
             self.cursor = (self.cursor - 1) % Sequencer.STEPS
         elif key == "Right":
             self.cursor = (self.cursor + 1) % Sequencer.STEPS
+        elif key == "Return":
+            return SequencerMenuScreen(self)
         elif key == "space":
             if self.seq.is_running():
                 self.seq.stop()
@@ -140,6 +137,59 @@ class SequencerScreen(Screen):
                 n += 1
             save_sequence(seq_ref, str(SEQS_DIR / f"{stem}.json"))
         return NameInputScreen("SEQ NAME", self.seq.name, on_name)
+
+
+class SequencerMenuScreen(Screen):
+    """3-option menu: Save / Load / Rename — opened from SequencerScreen via Enter."""
+
+    _ITEM_H = 80   # 3 × 80 = 240
+
+    def __init__(self, seq_screen: "SequencerScreen"):
+        self.seq_screen = seq_screen
+        self.selected   = 0
+        self._options   = ["Save", "Load", "Rename"]
+
+    def draw(self, draw, font, small):
+        font_h = draw.textbbox((0, 0), "A", font=font)[3]
+        for i, label in enumerate(self._options):
+            item_y = i * self._ITEM_H
+            if i == self.selected:
+                draw.rectangle([0, item_y, WIDTH - 1, item_y + self._ITEM_H - 1],
+                               fill=HIGHLIGHT)
+                txt_col = (255, 255, 255)
+            else:
+                draw.rectangle([0, item_y, WIDTH - 1, item_y + self._ITEM_H - 1],
+                               fill=(20, 20, 20))
+                txt_col = FG_DIM
+            cx = centered_x(draw, label, font)
+            cy = item_y + (self._ITEM_H - font_h) // 2
+            draw.text((cx, cy), label, fill=txt_col, font=font)
+            draw.line([(0, item_y + self._ITEM_H - 1), (WIDTH - 1, item_y + self._ITEM_H - 1)],
+                      fill=(40, 40, 40))
+
+    def handle_key(self, key):
+        if key == "BackSpace":
+            return "back"
+        elif key == "Up":
+            self.selected = (self.selected - 1) % len(self._options)
+        elif key == "Down":
+            self.selected = (self.selected + 1) % len(self._options)
+        elif key == "Return":
+            action = self._options[self.selected]
+            if action == "Save":
+                result = self.seq_screen._save()
+                # Pop menu; if _save returns a screen (NameInputScreen), push that
+                if result is not None:
+                    return result
+                return "back"
+            elif action == "Load":
+                return SequenceListScreen(self.seq_screen.seq)
+            elif action == "Rename":
+                seq_ref = self.seq_screen.seq
+                def on_name(name):
+                    seq_ref.name = name
+                return NameInputScreen("SEQ NAME", self.seq_screen.seq.name, on_name)
+        return None
 
 
 class SequenceListScreen(Screen):

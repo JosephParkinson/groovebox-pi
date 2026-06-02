@@ -173,14 +173,14 @@ def _get_win_audio() -> _WinAudioServer:
 # ── Stream mixer (Mac / Pi) ───────────────────────────────────────────────────
 #
 # ── Stream-mixer configuration (set by configure() before the first trigger) ──
-# Low-latency mode:  22050 Hz / 128 blocks  → same ~5.8 ms block time, ~50% less CPU
-# High-quality mode: 44100 Hz / 256 blocks  → full bandwidth, more CPU
+# Low-latency:  44100 Hz / 128 blocks  → ~2.9 ms block time
+# High-quality: 44100 Hz / 256 blocks  → ~5.8 ms, slightly less CPU
 #
-# Halving the sample rate keeps per-block latency identical (128/22050 ≈ 256/44100),
-# but the DSP work per block is halved and samples occupy half the memory.
+# 44100 Hz is used in both modes for broad hardware compatibility
+# (USB audio interfaces typically do not support 22050 Hz).
 
-MIXER_SAMPLERATE: int = 22050   # default: low-latency
-MIXER_BLOCKSIZE:  int = 128
+MIXER_SAMPLERATE: int = 44100
+MIXER_BLOCKSIZE:  int = 256
 
 
 def configure_audio(low_latency: bool) -> None:
@@ -190,9 +190,9 @@ def configure_audio(low_latency: bool) -> None:
     """
     global MIXER_SAMPLERATE, MIXER_BLOCKSIZE
     if low_latency:
-        MIXER_SAMPLERATE, MIXER_BLOCKSIZE = 22050, 128
-    else:
         MIXER_SAMPLERATE, MIXER_BLOCKSIZE = 44100, 256
+    else:
+        MIXER_SAMPLERATE, MIXER_BLOCKSIZE = 44100, 512
 
 
 class _StreamMixer:
@@ -207,7 +207,6 @@ class _StreamMixer:
             channels=2,
             dtype="float32",
             blocksize=MIXER_BLOCKSIZE,
-            latency="low",
             callback=self._callback,
         )
         self._stream.start()

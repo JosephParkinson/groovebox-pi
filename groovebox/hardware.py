@@ -34,28 +34,33 @@ _lcd = None
 def init_display() -> bool:
     """
     Initialise the Pirate Audio ST7789 LCD.
+    Retries a few times in case the SPI device is momentarily busy after boot.
     Returns True on success, False if hardware/library not available.
     """
     global _lcd
     if _ST7789_LIB is None:
         return False
-    try:
-        _lcd = _ST7789_LIB.ST7789(
-            port=0,
-            cs=1,                 # SPI CE1 — BCM 7 on Pirate Audio
-            dc=9,                 # BCM 9
-            backlight=13,         # BCM 13
-            rotation=90,          # correct orientation for Pirate Audio
-            spi_speed_hz=80_000_000,
-            width=240,
-            height=240,
-        )
-        _lcd.begin()
-        return True
-    except Exception as exc:
-        print(f"[hardware] ST7789 init failed: {exc}", file=sys.stderr)
-        _lcd = None
-        return False
+    for attempt in range(5):
+        try:
+            _lcd = _ST7789_LIB.ST7789(
+                port=0,
+                cs=1,                 # SPI CE1 — BCM 7 on Pirate Audio
+                dc=9,                 # BCM 9
+                backlight=13,         # BCM 13
+                rotation=90,          # correct orientation for Pirate Audio
+                spi_speed_hz=80_000_000,
+                width=240,
+                height=240,
+            )
+            _lcd.begin()
+            return True
+        except Exception as exc:
+            print(f"[hardware] ST7789 init attempt {attempt + 1} failed: {exc}", file=sys.stderr)
+            _lcd = None
+            if attempt < 4:
+                import time as _time
+                _time.sleep(1)
+    return False
 
 
 def display_image(img) -> None:

@@ -37,8 +37,10 @@ def pad_rect(index: int) -> tuple[int, int, int, int]:
     total_w = PAD_COLS * PAD_W + (PAD_COLS - 1) * PAD_GAP
     ox = (WIDTH - total_w) // 2
     row, col = divmod(index, PAD_COLS)
+    # Reverse row so low indices (P1-P4) sit at the bottom, matching the controller
+    display_row = PAD_ROWS - 1 - row
     x = ox + col * (PAD_W + PAD_GAP)
-    y = PAD_ORIGIN_Y + row * (PAD_H + PAD_GAP)
+    y = PAD_ORIGIN_Y + display_row * (PAD_H + PAD_GAP)
     return x, y, x + PAD_W, y + PAD_H
 
 

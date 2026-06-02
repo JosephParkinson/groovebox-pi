@@ -10,28 +10,32 @@ from .instruments import InstrumentsScreen
 
 
 class KitsScreen(Screen):
-    """Entry: choose Saved or Create New."""
+    """Entry: choose Saved or Create New. 2 options each 120px tall."""
 
     _OPTIONS = ["Saved", "Create New"]
+    _ITEM_H  = 120   # 2 × 120 = 240
 
     def __init__(self, kit: Kit):
         self.kit      = kit
         self.selected = 0
 
     def draw(self, draw, font, small):
-        draw.text((centered_x(draw, "KITS", font), 8), "KITS", fill=FG, font=font)
-        y = 70
+        font_h = draw.textbbox((0, 0), "A", font=font)[3]
         for i, label in enumerate(self._OPTIONS):
-            bbox = draw.textbbox((0, 0), label, font=font)
-            h    = bbox[3] - bbox[1]
+            item_y = i * self._ITEM_H
             if i == self.selected:
-                draw.rectangle([18, y - 7, WIDTH - 18, y + h + 7], fill=HIGHLIGHT)
-                draw.text((28, y), label, fill=WHITE, font=font)
+                draw.rectangle([0, item_y, WIDTH - 1, item_y + self._ITEM_H - 1],
+                               fill=HIGHLIGHT)
+                txt_col = WHITE
             else:
-                draw.text((28, y), label, fill=FG_DIM, font=font)
-            y += h + 20
-        hint = "↑↓:sel  Enter:open  Bksp:back"
-        draw.text((centered_x(draw, hint, small), HEIGHT - 22), hint, fill=(65, 65, 65), font=small)
+                draw.rectangle([0, item_y, WIDTH - 1, item_y + self._ITEM_H - 1],
+                               fill=(20, 20, 20))
+                txt_col = FG_DIM
+            cx = centered_x(draw, label, font)
+            cy = item_y + (self._ITEM_H - font_h) // 2
+            draw.text((cx, cy), label, fill=txt_col, font=font)
+            draw.line([(0, item_y + self._ITEM_H - 1), (WIDTH - 1, item_y + self._ITEM_H - 1)],
+                      fill=(40, 40, 40))
 
     def handle_key(self, key):
         if key == "BackSpace":
@@ -61,9 +65,10 @@ class KitsScreen(Screen):
 
 
 class KitsSavedScreen(Screen):
-    """List of saved kits."""
+    """List of saved kits. 5 visible items × 48px each. No title."""
 
     VISIBLE = 5
+    _ITEM_H = 48
 
     def __init__(self, kit: Kit):
         self.kit    = kit
@@ -83,25 +88,37 @@ class KitsSavedScreen(Screen):
             return self.files[idx].stem
 
     def draw(self, draw, font, small):
-        draw.text((centered_x(draw, "SAVED KITS", font), 8), "SAVED KITS", fill=FG, font=font)
+        font_h = draw.textbbox((0, 0), "A", font=font)[3]
         if not self.files:
-            draw.text((centered_x(draw, "No kits saved", small), HEIGHT // 2),
-                      "No kits saved", fill=FG_DIM, font=small)
+            draw.text((centered_x(draw, "No kits saved", font), HEIGHT // 2 - font_h // 2),
+                      "No kits saved", fill=FG_DIM, font=font)
         else:
-            for rel in range(min(self.VISIBLE, len(self.files) - self.scroll)):
+            visible_count = min(self.VISIBLE, len(self.files) - self.scroll)
+            for rel in range(visible_count):
                 idx   = self.scroll + rel
                 label = self._get_label(idx)
                 sel   = idx == self.cursor
-                y     = 38 + rel * 26
+                item_y = rel * self._ITEM_H
                 if sel:
-                    bbox = draw.textbbox((0, 0), label, font=small)
-                    h    = bbox[3] - bbox[1]
-                    draw.rectangle([5, y - 2, WIDTH - 5, y + h + 2], fill=HIGHLIGHT)
-                    draw.text((10, y), label, fill=WHITE, font=small)
+                    draw.rectangle([0, item_y, WIDTH - 1, item_y + self._ITEM_H - 1],
+                                   fill=HIGHLIGHT)
+                    txt_col = WHITE
                 else:
-                    draw.text((10, y), label, fill=FG, font=small)
-        hint = "Enter:open  Bksp:back"
-        draw.text((centered_x(draw, hint, small), HEIGHT - 22), hint, fill=(65, 65, 65), font=small)
+                    draw.rectangle([0, item_y, WIDTH - 1, item_y + self._ITEM_H - 1],
+                                   fill=(20, 20, 20))
+                    txt_col = FG
+                cy = item_y + (self._ITEM_H - font_h) // 2
+                draw.text((12, cy), label[:22], fill=txt_col, font=font)
+                draw.line([(0, item_y + self._ITEM_H - 1), (WIDTH - 1, item_y + self._ITEM_H - 1)],
+                          fill=(40, 40, 40))
+
+            # Scrollbar on right edge if more items than visible
+            if len(self.files) > self.VISIBLE:
+                total   = len(self.files)
+                bar_h   = HEIGHT * self.VISIBLE // total
+                bar_y   = HEIGHT * self.scroll  // total
+                draw.rectangle([WIDTH - 4, bar_y, WIDTH - 1, bar_y + bar_h],
+                               fill=FG_DIM)
 
     def handle_key(self, key):
         if key == "BackSpace":
@@ -123,9 +140,12 @@ class KitsSavedScreen(Screen):
 
 
 class KitEditScreen(Screen):
-    """Actions for a selected kit: Load, Rename, Edit Pads, Delete."""
+    """Actions for a selected kit: Load, Rename, Edit Pads, Delete.
+    4 options × 54px below a small name strip at y=0..17."""
 
     _OPTIONS = ["Load", "Rename", "Edit Pads", "Delete"]
+    _ITEM_Y0 = 18   # options start below the name strip
+    _ITEM_H  = (HEIGHT - 18) // 4   # ≈ 55px each
 
     def __init__(self, kit: Kit, path: Path, on_change):
         self.kit       = kit
@@ -142,24 +162,26 @@ class KitEditScreen(Screen):
             return self.path.stem
 
     def draw(self, draw, font, small):
+        # Kit name in dim small text at top
         title = self._kit_display_name()
-        draw.text((centered_x(draw, title[:18], small), 8), title[:18], fill=FG, font=small)
-        draw.line([(10, 24), (WIDTH - 10, 24)], fill=FG_DIM)
+        draw.text((6, 4), title[:22], fill=FG_DIM, font=small)
 
-        y = 38
+        font_h = draw.textbbox((0, 0), "A", font=font)[3]
         for i, label in enumerate(self._OPTIONS):
-            bbox = draw.textbbox((0, 0), label, font=font)
-            h    = bbox[3] - bbox[1]
+            item_y = self._ITEM_Y0 + i * self._ITEM_H
             if i == self.selected:
-                draw.rectangle([18, y - 5, WIDTH - 18, y + h + 5], fill=HIGHLIGHT)
-                draw.text((28, y), label, fill=WHITE, font=font)
+                draw.rectangle([0, item_y, WIDTH - 1, item_y + self._ITEM_H - 1],
+                               fill=HIGHLIGHT)
+                txt_col = WHITE
             else:
-                col = RED if label == "Delete" else FG_DIM
-                draw.text((28, y), label, fill=col, font=font)
-            y += h + 14
-
-        hint = "↑↓:sel  Enter:open  Bksp:back"
-        draw.text((centered_x(draw, hint, small), HEIGHT - 22), hint, fill=(65, 65, 65), font=small)
+                draw.rectangle([0, item_y, WIDTH - 1, item_y + self._ITEM_H - 1],
+                               fill=(20, 20, 20))
+                txt_col = RED if label == "Delete" else FG_DIM
+            cx = centered_x(draw, label, font)
+            cy = item_y + (self._ITEM_H - font_h) // 2
+            draw.text((cx, cy), label, fill=txt_col, font=font)
+            draw.line([(0, item_y + self._ITEM_H - 1), (WIDTH - 1, item_y + self._ITEM_H - 1)],
+                      fill=(40, 40, 40))
 
     def handle_key(self, key):
         if key == "BackSpace":

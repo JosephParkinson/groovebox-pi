@@ -9,6 +9,8 @@ from .looper_screen import LooperScreen
 from .sequencer_screen import SequencerScreen
 from .settings_screen import SettingsScreen
 
+_ITEM_H = 60   # each item occupies exactly 60px → 4 × 60 = 240
+
 
 class MainMenu(Screen):
     def __init__(self, kit: Kit, engine: LoopEngine, seq: Sequencer, settings: Settings):
@@ -25,18 +27,21 @@ class MainMenu(Screen):
         ]
 
     def draw(self, draw, font, small):
-        title = "GROOVEBOX"
-        draw.text((centered_x(draw, title, font), 8), title, fill=FG, font=font)
-        y = 60
+        font_h = draw.textbbox((0, 0), "A", font=font)[3]
         for i, (label, _) in enumerate(self._options):
-            bbox = draw.textbbox((0, 0), label, font=font)
-            h = bbox[3] - bbox[1]
+            item_y = i * _ITEM_H
             if i == self.selected:
-                draw.rectangle([18, y - 7, WIDTH - 18, y + h + 7], fill=HIGHLIGHT)
-                draw.text((28, y), label, fill=WHITE, font=font)
+                draw.rectangle([0, item_y, WIDTH - 1, item_y + _ITEM_H - 1], fill=HIGHLIGHT)
+                txt_col = WHITE
             else:
-                draw.text((28, y), label, fill=FG_DIM, font=font)
-            y += h + 18
+                draw.rectangle([0, item_y, WIDTH - 1, item_y + _ITEM_H - 1], fill=(20, 20, 20))
+                txt_col = FG_DIM
+            cx = centered_x(draw, label, font)
+            cy = item_y + (_ITEM_H - font_h) // 2
+            draw.text((cx, cy), label, fill=txt_col, font=font)
+            # 1px separator at bottom of each item
+            draw.line([(0, item_y + _ITEM_H - 1), (WIDTH - 1, item_y + _ITEM_H - 1)],
+                      fill=(40, 40, 40))
 
     def handle_key(self, key):
         if key == "Up":

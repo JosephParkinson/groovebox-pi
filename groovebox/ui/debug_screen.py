@@ -11,6 +11,11 @@ from ..constants import (
 )
 from .base import Screen, centered_x
 
+_DEV_ROW_H   = 22   # height per device row
+_LOG_ROW_H   = 22   # height per log entry
+_LOG_ENTRIES = 3    # number of log lines shown
+_BTN_H       = 40   # test-button height
+
 
 class DebugScreen(Screen):
 
@@ -26,57 +31,46 @@ class DebugScreen(Screen):
     def draw(self, draw, font, small):
         self._maybe_refresh_devices()
 
-        y = 5
-        draw.text((centered_x(draw, "DEBUG", font), y), "DEBUG", fill=FG, font=font)
-        y += 20
-        draw.line([(4, y), (WIDTH - 4, y)], fill=FG_DIM)
-        y += 5
+        y = 0
 
-        # ── Detected devices ─────────────────────────────────────────────────
-        draw.text((4, y), "Devices:", fill=FG, font=small)
-        y += 13
-
+        # ── Detected devices (5 rows × 22px = 110px) ─────────────────────────
         dc = self._device_cache
         for label, (info, ok) in [
-            ("Audio",  dc.get("audio",  ("—", False))),
-            ("MIDI in",dc.get("midi",   ("—", False))),
-            ("Clock",  dc.get("clock",  ("—", False))),
-            ("LCD",    dc.get("lcd",    ("—", False))),
-            ("GPIO",   dc.get("gpio",   ("—", False))),
+            ("Audio",   dc.get("audio",  ("—", False))),
+            ("MIDI in", dc.get("midi",   ("—", False))),
+            ("Clock",   dc.get("clock",  ("—", False))),
+            ("LCD",     dc.get("lcd",    ("—", False))),
+            ("GPIO",    dc.get("gpio",   ("—", False))),
         ]:
             col = GREEN if ok else RED
-            draw.text((6,  y), f"{label}:", fill=FG_DIM, font=small)
-            draw.text((46, y), info[:24],   fill=col,    font=small)
-            y += 13
+            draw.text((6,  y + 4), f"{label}:", fill=FG_DIM, font=small)
+            draw.text((54, y + 4), info[:22],   fill=col,    font=font)
+            y += _DEV_ROW_H
 
-        y += 3
+        # Separator
         draw.line([(4, y), (WIDTH - 4, y)], fill=FG_DIM)
-        y += 5
+        y += 3
 
         # ── Live input log ────────────────────────────────────────────────────
-        draw.text((4, y), "Last inputs:", fill=FG, font=small)
-        y += 13
-
         from ..event_log import snapshot
-        for entry in snapshot()[:5]:
-            draw.text((6, y), entry[:30], fill=FG_DIM, font=small)
-            y += 12
+        for entry in snapshot()[:_LOG_ENTRIES]:
+            draw.text((6, y + 4), entry[:28], fill=FG_DIM, font=font)
+            y += _LOG_ROW_H
+
+        # Separator
+        draw.line([(4, y), (WIDTH - 4, y)], fill=FG_DIM)
+        y += 3
 
         # ── Test audio button ─────────────────────────────────────────────────
-        btn_y = HEIGHT - 34
-        draw.line([(4, btn_y - 4), (WIDTH - 4, btn_y - 4)], fill=FG_DIM)
-
+        btn_y = HEIGHT - _BTN_H
+        draw.rectangle([10, btn_y + 2, WIDTH - 10, HEIGHT - 4], fill=HIGHLIGHT)
         status_col = GREEN if self._tone_status == "OK" \
                      else (RED if self._tone_status.startswith("Err") else AMBER)
-        tone_lbl   = "[ Test Audio ]"
+        tone_lbl = "[ Test Audio ]"
         if self._tone_status:
             tone_lbl += f"  {self._tone_status}"
-        draw.rectangle([16, btn_y - 1, WIDTH - 16, btn_y + 15], fill=HIGHLIGHT)
-        draw.text((centered_x(draw, tone_lbl, small), btn_y + 1),
-                  tone_lbl, fill=WHITE, font=small)
-
-        draw.text((centered_x(draw, "Enter:test  Bksp:back", small), HEIGHT - 14),
-                  "Enter:test  Bksp:back", fill=(65, 65, 65), font=small)
+        draw.text((centered_x(draw, tone_lbl, font), btn_y + ((_BTN_H - 14) // 2)),
+                  tone_lbl, fill=WHITE, font=font)
 
     # ── Device detection (cached) ─────────────────────────────────────────────
 
@@ -110,7 +104,6 @@ class DebugScreen(Screen):
             import mido
             ports = mido.get_input_names()
             if ports:
-                # Show how many ports; highlight MPK Mini if found
                 mpk = next((p for p in ports if "mpk" in p.lower()), None)
                 label = mpk[:22] if mpk else f"{len(ports)} port(s) found"
                 return (label, True)
@@ -124,9 +117,6 @@ class DebugScreen(Screen):
             ports = MidiClockMaster.list_output_ports()
             if not ports:
                 return ("no MIDI outputs", False)
-            # Check if main.py's clock instance is connected by scanning outputs
-            # for an RC-505 — we can't easily reach the live instance from here,
-            # so just report availability
             rc = next((p for p in ports
                        if "rc-505" in p.lower() or "rc505" in p.lower()), None)
             if rc:

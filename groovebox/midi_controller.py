@@ -23,8 +23,8 @@ DEFAULT PRESET 1 — Bank A note numbers (update NOTE_TO_KEY if yours differ):
   P1=36, P2=38, P3=42, P4=46   (bot: a s d f in the groovebox)
 
 Knob CC defaults:
-  K1 (top-left)  = CC 70  → master volume
-  K4 (top-right) = CC 73  → tempo
+  K1 (top-left)  = CC 1   → master volume
+  K4 (top-right) = CC 4   → tempo
 
 Pad CC defaults (CC-button mode, when you press CC on the MPK Mini):
   P5=CC24, P6=CC25, P7=CC26, P8=CC27  (top row)
@@ -35,7 +35,6 @@ Pad PC defaults (Prog-Change-button mode):
 
 Navigation summary:
   • Joystick X (pitch bend)  → Left / Right
-  • Joystick Y (mod CC 1)    → Up / Down
   • OUTSIDE play/seq:
       P8 (note-on)  → Enter       P7 (note-on)  → Back
   • INSIDE play/seq (prog-change mode active):
@@ -44,9 +43,12 @@ Navigation summary:
   • INSIDE play (CC mode active):
       P5-P8 CC      → arm loops 1-4
       P1-P4 CC      → mute loops 1-4
-  • K4 knob (CC 73)  → tempo  (0 = 40 BPM, 127 = 294 BPM, 2 BPM/step)
-  • K1 knob (CC 70)  → master volume
+  • K4 knob (CC 4)   → tempo  (0 = 40 BPM, 127 = 294 BPM, 2 BPM/step)
+  • K1 knob (CC 1)   → master volume
 """
+
+import threading
+import time as _time
 
 from midi import MidiHandler
 
@@ -69,20 +71,23 @@ CC_PAD: dict[int, tuple[str, int]] = {
 }
 
 # ── Knob CCs ────────────────────────────────────────────────────────────────
-CC_VOLUME = 70    # K1 top-left  — master volume
-CC_TEMPO  = 73    # K4 top-right — tempo
-CC_MOD    = 1     # joystick Y-axis (mod wheel)
+CC_VOLUME = 1     # K1 top-left  — master volume
+CC_TEMPO  = 4     # K4 top-right — tempo
 
-# ── Prog-change pad actions (shift mode) ───────────────────────────────────
-PC_TOP_RIGHT = 7   # P8 → Enter
-PC_TOP_BACK  = 6   # P7 → Back
-PC_LOOP_LEN  = 4   # P5 → cycle loop length (LooperScreen: same as Right arrow)
-PC_OVERDUB   = 5   # P6 → toggle overdub mode (LooperScreen: same as 'o' key)
+# ── Prog-change pad layout (all active on every screen) ────────────────────
+#   Bottom row:  P1=PC0  P2=PC1  P3=PC2  P4=PC3
+#   Top row:     P5=PC4  P6=PC5  P7=PC6  P8=PC7
+PC_LEFT  = 0   # P1 → Left
+PC_UP    = 1   # P2 → Up
+PC_RIGHT = 2   # P3 → Right
+PC_STOP  = 3   # P4 → master stop (all loops + sequencer)
+PC_PLAY  = 4   # P5 → sequencer play/stop toggle
+PC_DOWN  = 5   # P6 → Down
+PC_BACK  = 6   # P7 → Back
+PC_ENTER = 7   # P8 → Enter
 
 # ── Joystick navigation thresholds ─────────────────────────────────────────
 PITCH_THRESH    = 2000   # out of ±8192
-MOD_UP_THRESH   = 90     # out of 0–127
-MOD_DOWN_THRESH = 30
 
 
 class MidiController:
@@ -99,8 +104,11 @@ class MidiController:
         self._seq          = seq
         self._stack_getter = stack_getter
         self._key          = key_callback
-        self._lr_dir       = 0   # last left/right joystick position
-        self._ud_dir       = 0   # last up/down joystick position
+        self._lr_dir          = 0
+        self._lr_neutral_since = _time.monotonic()   # when joystick last entered LR neutral
+        # Joystick must dwell in neutral for this long before a new direction fires.
+        # Filters spring-back artefacts (typically <80ms) after releasing the stick.
+        self._STICK_SETTLE = 0.15
 
         self._handler = MidiHandler(
             on_note           = self._on_note,
@@ -110,10 +118,28 @@ class MidiController:
         )
 
     def connect(self, port_name: str | None = None) -> bool:
-        return self._handler.connect(port_name)
+        result = self._handler.connect(port_name)
+        threading.Thread(target=self._reconnect_watcher, daemon=True).start()
+        return result
 
     def list_ports(self) -> list[str]:
         return self._handler.list_ports()
+
+    def _reconnect_watcher(self) -> None:
+        """Reconnect to a preferred port (MPK) whenever it appears or the active port drops."""
+        while True:
+            _time.sleep(3)
+            try:
+                ports   = self._handler.list_ports()
+                active  = self._handler.active_port()
+                # Prefer any port whose name contains 'mpk'
+                preferred = next((p for p in ports if "mpk" in p.lower()), None)
+                target = preferred or (ports[0] if ports else None)
+                if target and target != active:
+                    print(f"MIDI: switching to '{target}'")
+                    self._handler.connect(target)
+            except Exception:
+                pass
 
     # ── Internal helpers ──────────────────────────────────────────────────────
 
@@ -153,18 +179,6 @@ class MidiController:
             set_master_volume(value / 127.0)
             return
 
-        if control == CC_MOD:
-            if value > MOD_UP_THRESH:
-                new_dir = 1
-            elif value < MOD_DOWN_THRESH:
-                new_dir = -1
-            else:
-                new_dir = 0
-            if new_dir != self._ud_dir and new_dir != 0:
-                self._key("Up" if new_dir > 0 else "Down")
-            self._ud_dir = new_dir
-            return
-
         # CC pad (CC-button mode active on the MPK Mini)
         if control in CC_PAD:
             if value == 0:
@@ -185,23 +199,30 @@ class MidiController:
             new_dir = -1
         else:
             new_dir = 0
-        if new_dir != self._lr_dir and new_dir != 0:
-            self._key("Right" if new_dir > 0 else "Left")
-        self._lr_dir = new_dir
+        if new_dir != self._lr_dir:
+            if new_dir == 0:
+                self._lr_neutral_since = _time.monotonic()
+            elif self._lr_dir == 0:
+                if _time.monotonic() - self._lr_neutral_since >= self._STICK_SETTLE:
+                    self._key("Right" if new_dir > 0 else "Left")
+            self._lr_dir = new_dir
 
     def _on_program_change(self, program: int) -> None:
-        screen = self._screen()
-        if screen == "LooperScreen":
-            if program == PC_LOOP_LEN:
-                self._key("Right")      # → set_bars(cursor, +1) in LooperScreen
-            elif program == PC_OVERDUB:
-                self._key("o")          # → toggle_overdub_mode in LooperScreen
-            elif program == PC_TOP_BACK:
-                self._key("BackSpace")
-            elif program == PC_TOP_RIGHT:
-                self._key("Return")
-        elif screen == "SequencerScreen":
-            if program == PC_TOP_BACK:
-                self._key("BackSpace")
-            elif program == PC_TOP_RIGHT:
-                self._key("Return")
+        _KEYS = {
+            PC_LEFT:  "Left",
+            PC_UP:    "Down",
+            PC_RIGHT: "Right",
+            PC_DOWN:  "Up",
+            PC_BACK:  "BackSpace",
+            PC_ENTER: "Return",
+        }
+        if program in _KEYS:
+            self._key(_KEYS[program])
+        elif program == PC_STOP:
+            self._engine.stop()
+            self._seq.stop()
+        elif program == PC_PLAY:
+            if self._seq.is_running():
+                self._seq.stop()
+            else:
+                self._seq.start()
