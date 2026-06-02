@@ -14,5 +14,5 @@ mkdir -p samples kits
 
 echo ""
 echo "Setup complete."
-echo "  Run emulator : .venv/bin/python lcd_emulator.py"
+echo "  Run emulator : .venv/bin/python main.py"
 echo "  List MIDI    : .venv/bin/python list_midi.py"
