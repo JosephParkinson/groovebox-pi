@@ -158,7 +158,93 @@ Navigate with ↑ / ↓ / Enter / Backspace. Within a saved kit, choose **Load**
 
 ---
 
+## Syncing with the Boss RC-505 MKII
+
+The groovebox acts as a **MIDI clock master**.  When you arm the first loop and
+the count-in finishes, it sends a MIDI `Start` message followed by 24 pulses per
+quarter note (`Timing Clock`) so the RC-505 locks its loop length to the same
+tempo.
+
+### Hardware connection
+
+Connect a **USB-A → USB-B cable** from any free USB port on the Pi to the USB
+port on the rear of the RC-505. No adapter or drivers are needed — the RC-505
+is USB class-compliant and appears automatically as a MIDI device.
+
+### RC-505 settings
+
+1. Hold **SYSTEM** until the display shows `SYS`.
+2. Navigate to **MIDI** → **MIDI SYNC** → set to **`USB`** (or **`MIDI`** if
+   using a 5-pin DIN adapter instead).
+3. While you're there, confirm **MIDI OUT** is enabled and **LOOP SYNC** is set
+   to **`MIDI`**.
+4. Press **EXIT** to save.
+
+### Simplest end-to-end test
+
+This single test confirms the entire signal chain is working:
+
+1. Plug the USB cable and power on both devices.
+2. On the Pi, open **Settings → Debug** — the **Clock** row should turn green
+   and show `RC-505 MIDI 1` (or similar).  If it shows red, see
+   [MIDI clock not sending](#midi-clock-not-sending) below.
+3. On the RC-505, select an empty slot in Loop 1 and set a loop length (e.g.
+   4 bars).
+4. Back on the groovebox, go to **Play**, arm channel 1 (press `1` or MPK pad
+   P5), and count in.
+5. The RC-505 display should flash its tempo indicator in time with the
+   groovebox count-in, then lock to exactly the same BPM when playback starts.
+6. Record a short loop on the RC-505 (press its REC button on beat 1).  The
+   loop will finish at exactly the right bar boundary without drifting.
+
+If the RC-505 tempo display matches the groovebox BPM shown at the top of the
+Play screen, the sync is working correctly.
+
+---
+
 ## Troubleshooting
+
+### MIDI clock not sending
+
+1. Check the **Debug screen** — is the Clock row green and showing the RC-505
+   port name?
+2. Confirm the USB cable is data-capable (not a charge-only cable). Test with:
+   ```bash
+   lsusb | grep -i boss
+   # Should show: Bus ... ID ...:... Roland Corp. (or similar)
+   aconnect -l
+   # Should show the RC-505 as a MIDI output client
+   ```
+3. Verify MIDI outputs are visible to Python:
+   ```bash
+   .venv/bin/python -c "import mido; print(mido.get_output_names())"
+   # Expected: [..., 'RC-505 MIDI 1 0:0', ...]
+   ```
+4. If the port appears in `aconnect -l` but not in mido, install the ALSA
+   backend: `.venv/bin/pip install python-rtmidi`.
+5. If no RC-505 port exists, the groovebox clock auto-connects to the **first
+   available** MIDI output instead.  Re-check the USB cable and retry.
+
+### RC-505 not locking to tempo
+
+1. Confirm **MIDI SYNC = USB** (not `INT`) on the RC-505 — when set to `INT`
+   it ignores incoming clock completely.
+2. Make sure the groovebox **Play screen** is visible and an arm press (`1`) has
+   been made before you try to record on the RC-505.  The `Start` message is
+   only sent once the count-in finishes.
+3. RC-505 loop length must be set **before** pressing REC — the RC-505 in slave
+   mode quantises to its pre-set loop length, not to the incoming clock directly.
+4. If the RC-505 drifts slowly over many bars, it may be receiving occasional
+   late clock pulses due to Linux scheduling.  Run the groovebox with elevated
+   priority:
+   ```bash
+   sudo nice -n -10 .venv/bin/python main.py
+   ```
+   For a permanent fix on the Pi, add to `/etc/security/limits.conf`:
+   ```
+   pi  -  rtprio  50
+   pi  -  nice    -10
+   ```
 
 ### Settings → Debug screen
 

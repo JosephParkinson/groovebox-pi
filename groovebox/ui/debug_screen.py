@@ -38,10 +38,11 @@ class DebugScreen(Screen):
 
         dc = self._device_cache
         for label, (info, ok) in [
-            ("Audio", dc.get("audio", ("—", False))),
-            ("MIDI",  dc.get("midi",  ("—", False))),
-            ("LCD",   dc.get("lcd",   ("—", False))),
-            ("GPIO",  dc.get("gpio",  ("—", False))),
+            ("Audio",  dc.get("audio",  ("—", False))),
+            ("MIDI in",dc.get("midi",   ("—", False))),
+            ("Clock",  dc.get("clock",  ("—", False))),
+            ("LCD",    dc.get("lcd",    ("—", False))),
+            ("GPIO",   dc.get("gpio",   ("—", False))),
         ]:
             col = GREEN if ok else RED
             draw.text((6,  y), f"{label}:", fill=FG_DIM, font=small)
@@ -86,6 +87,7 @@ class DebugScreen(Screen):
         self._device_cache = {
             "audio": self._audio_info(),
             "midi":  self._midi_info(),
+            "clock": self._clock_info(),
             "lcd":   self._lcd_info(),
             "gpio":  self._gpio_info(),
         }
@@ -115,6 +117,23 @@ class DebugScreen(Screen):
             return ("no MIDI ports", False)
         except Exception:
             return ("mido unavailable", False)
+
+    def _clock_info(self) -> tuple[str, bool]:
+        try:
+            from ..midi_clock import MidiClockMaster
+            ports = MidiClockMaster.list_output_ports()
+            if not ports:
+                return ("no MIDI outputs", False)
+            # Check if main.py's clock instance is connected by scanning outputs
+            # for an RC-505 — we can't easily reach the live instance from here,
+            # so just report availability
+            rc = next((p for p in ports
+                       if "rc-505" in p.lower() or "rc505" in p.lower()), None)
+            if rc:
+                return (rc[:22], True)
+            return (f"{len(ports)} output(s) found", True)
+        except Exception as exc:
+            return (str(exc)[:24], False)
 
     def _lcd_info(self) -> tuple[str, bool]:
         try:

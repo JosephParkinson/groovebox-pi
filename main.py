@@ -37,6 +37,7 @@ from groovebox.looper import LoopEngine
 from groovebox.sequencer import Sequencer
 from groovebox.settings import Settings
 from groovebox.ui.base import Screen, find_font, pil_to_tk
+from groovebox.midi_clock import MidiClockMaster
 from groovebox.midi_controller import MidiController
 from groovebox.ui.main_menu import MainMenu
 
@@ -148,6 +149,10 @@ class Groovebox:
         )
         self._midi.connect()   # no-op if no MIDI device is present
 
+        # MIDI clock master — syncs RC-505 (or any slave) to the engine tempo
+        self._clock = MidiClockMaster(self.engine)
+        self._clock.connect()   # auto-selects RC-505 or first available output
+
         root.bind("<Key>",        self._on_key)
         root.bind("<KeyRelease>", self._on_keyup)
         root.lift()
@@ -258,6 +263,9 @@ def run_headless() -> None:
         key_callback = on_gpio_key,
     )
     midi.connect()
+
+    clock = MidiClockMaster(engine)
+    clock.connect()
 
     frame_ms  = 66 if settings.low_latency else 40
     frame_sec = frame_ms / 1000.0
