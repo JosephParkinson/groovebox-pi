@@ -3,7 +3,7 @@ import threading
 import time
 from pathlib import Path
 
-from .audio import _WSL, _get_win_audio, _trigger_pad, play_wav
+from .audio import _WSL, _get_win_audio, _trigger_pad, _trigger_pads_batch, play_wav
 from .kit import Kit
 from .settings import Settings
 
@@ -186,14 +186,17 @@ class LoopEngine:
                     to_play = self._tick_count_in(now)
                 elif self._phase == "running":
                     to_play = self._tick_running(now, last)
-            for item in to_play:
-                if item == "hat":
-                    threading.Thread(target=self._play_hat, daemon=True).start()
-                else:
-                    p = item
-                    threading.Thread(
-                        target=lambda x=p: _trigger_pad(x, self.kit), daemon=True
-                    ).start()
+            if to_play:
+                hats = [x for x in to_play if x == "hat"]
+                pads = [x for x in to_play if x != "hat"]
+                # Single thread for the whole batch: all trigger files are written
+                # in one tight loop so the PS watcher sees them in the same scan window.
+                def _fire(hats=hats, pads=pads):
+                    if hats:
+                        self._play_hat()
+                    if pads:
+                        _trigger_pads_batch(pads, self.kit)
+                threading.Thread(target=_fire, daemon=True).start()
             last = now
 
     def _tick_count_in(self, now: float) -> list:

@@ -191,6 +191,7 @@ def play_wav(path: str) -> None:
 
 
 def _trigger_pad(pad: int, kit) -> None:
+    """Non-blocking single-pad trigger — safe to call from the UI thread."""
     path = kit.pads[pad]
     if not path:
         return
@@ -198,6 +199,30 @@ def _trigger_pad(pad: int, kit) -> None:
         threading.Thread(target=lambda: _get_win_audio().play_pad(pad), daemon=True).start()
     else:
         play_wav(path)
+
+
+_PS_AVAILABLE: bool | None = None
+
+
+def _trigger_pads_batch(pads: list[int], kit) -> None:
+    """Fire multiple pads from a background thread with no per-pad thread overhead.
+
+    All WSL trigger files are written in a tight loop so the PowerShell watcher
+    picks them up in the same 5ms scan window, eliminating inter-pad jitter.
+    """
+    global _PS_AVAILABLE
+    if _PS_AVAILABLE is None:
+        _PS_AVAILABLE = bool(shutil.which("powershell.exe"))
+    if _WSL and _PS_AVAILABLE:
+        server = _get_win_audio()
+        for pad in pads:
+            if kit.pads[pad]:
+                server.play_pad(pad)
+    else:
+        for pad in pads:
+            path = kit.pads[pad]
+            if path:
+                play_wav(path)  # simpleaudio / afplay are non-blocking
 
 
 def _preload_all(kit) -> None:
