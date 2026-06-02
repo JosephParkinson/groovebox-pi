@@ -6,10 +6,13 @@ import sys
 import tempfile
 import threading
 import wave
+from collections import deque
 from pathlib import Path
 
 try:
-    import simpleaudio
+    import sounddevice as sd
+    import soundfile as sf
+    import numpy as np
     _AUDIO = True
 except ImportError:
     _AUDIO = False
@@ -121,11 +124,7 @@ def _to_16bit(path: str) -> str:
 
 
 class _WinAudioServer:
-    """PowerShell FileSystemWatcher audio server for WSL2.
-
-    Watches a Windows-local temp dir for trigger files written by Python.
-    SoundPlayer runs in a normal Windows process with full audio access.
-    """
+    """PowerShell FileSystemWatcher audio server for WSL2."""
 
     def __init__(self):
         _TRIGGER_DIR.mkdir(parents=True, exist_ok=True)
@@ -162,7 +161,6 @@ class _WinAudioServer:
 
 
 _win_audio: _WinAudioServer | None = None
-_wav_obj_cache: dict[str, object] = {}  # path → simpleaudio.WaveObject
 
 
 def _get_win_audio() -> _WinAudioServer:
@@ -172,27 +170,113 @@ def _get_win_audio() -> _WinAudioServer:
     return _win_audio
 
 
-def _cache_wav(path: str) -> None:
-    """Read a WAV file into a WaveObject and cache it. Call from a background thread."""
-    if not _AUDIO or path in _wav_obj_cache:
-        return
-    try:
-        _wav_obj_cache[path] = simpleaudio.WaveObject.from_wave_file(path)
-    except Exception:
-        pass
+# ── Stream mixer (Mac / Pi) ───────────────────────────────────────────────────
+#
+# One always-running PortAudio output stream. Samples are pre-loaded as numpy
+# float32 arrays. Triggering a pad just appends a voice to a deque; the
+# callback mixes all active voices into each output block with zero per-trigger
+# overhead and no file I/O at playback time.
+#
+# On Raspberry Pi with onboard audio, increase BLOCKSIZE to 512 if you get
+# underruns. With an I2S DAC, 256 is stable.
+
+class _StreamMixer:
+    SAMPLERATE = 44100
+    BLOCKSIZE  = 256   # ~5.8 ms per block; raise to 512 on Pi onboard audio
+
+    def __init__(self):
+        self._samples: dict[str, "np.ndarray"] = {}
+        self._queue:   deque = deque()   # main thread → callback, lockless
+        self._active:  list  = []        # owned exclusively by the callback
+        self._stream = sd.OutputStream(
+            samplerate=self.SAMPLERATE,
+            channels=2,
+            dtype="float32",
+            blocksize=self.BLOCKSIZE,
+            latency="low",
+            callback=self._callback,
+        )
+        self._stream.start()
+
+    def load(self, path: str) -> None:
+        """Read a WAV into memory as a float32 stereo array (background-thread safe)."""
+        if path in self._samples:
+            return
+        try:
+            data, sr = sf.read(path, dtype="float32", always_2d=True)
+            # Upmix mono → stereo
+            if data.shape[1] == 1:
+                data = np.repeat(data, 2, axis=1)
+            # Resample if sample rate doesn't match stream (linear, good enough for drums)
+            if sr != self.SAMPLERATE:
+                ratio = self.SAMPLERATE / sr
+                n = int(len(data) * ratio)
+                old_x = np.arange(len(data))
+                new_x = np.linspace(0, len(data) - 1, n)
+                data = np.stack(
+                    [np.interp(new_x, old_x, data[:, c]) for c in range(data.shape[1])],
+                    axis=1,
+                )
+            self._samples[path] = np.ascontiguousarray(data, dtype=np.float32)
+        except Exception as e:
+            print(f"StreamMixer load: {e}", file=sys.stderr)
+
+    def play(self, path: str) -> None:
+        """Queue a sample for immediate playback. Returns instantly."""
+        data = self._samples.get(path)
+        if data is None:
+            # Not preloaded — load async and skip this trigger to avoid blocking
+            threading.Thread(target=self.load, args=(path,), daemon=True).start()
+            return
+        self._queue.append({"data": data, "pos": 0})
+
+    def _callback(self, outdata: "np.ndarray", frames: int, time, status) -> None:
+        # Drain new triggers queued by the main thread (deque ops are GIL-atomic)
+        while self._queue:
+            try:
+                self._active.append(self._queue.popleft())
+            except IndexError:
+                break
+
+        outdata.fill(0.0)
+        done = []
+        for v in self._active:
+            n = min(frames, len(v["data"]) - v["pos"])
+            outdata[:n] += v["data"][v["pos"]: v["pos"] + n]
+            v["pos"] += n
+            if v["pos"] >= len(v["data"]):
+                done.append(v)
+        for v in done:
+            self._active.remove(v)
+
+        # Soft clip to prevent inter-sample peaks from distorting
+        np.clip(outdata, -1.0, 1.0, out=outdata)
+
+
+_stream_mixer: _StreamMixer | None = None
+
+
+def _get_stream_mixer() -> _StreamMixer:
+    global _stream_mixer
+    if _stream_mixer is None:
+        _stream_mixer = _StreamMixer()
+    return _stream_mixer
+
+
+# ── Public audio API ──────────────────────────────────────────────────────────
+
+def preload_wav(path: str) -> None:
+    """Cache a sample for zero-latency playback. Safe to call from any thread."""
+    if _AUDIO:
+        _get_stream_mixer().load(path)
 
 
 def play_wav(path: str) -> None:
-    """Play a WAV file. Used on non-WSL platforms (Pi / Mac)."""
+    """Play a WAV file on Mac / Pi. Returns immediately."""
     if _AUDIO:
-        try:
-            if path not in _wav_obj_cache:
-                _wav_obj_cache[path] = simpleaudio.WaveObject.from_wave_file(path)
-            _wav_obj_cache[path].play()
-            return
-        except Exception:
-            pass
-
+        _get_stream_mixer().play(path)
+        return
+    # Fallback when sounddevice is unavailable
     def _run():
         if shutil.which("afplay"):
             subprocess.run(["afplay", path], capture_output=True)
@@ -218,11 +302,7 @@ _PS_AVAILABLE: bool | None = None
 
 
 def _trigger_pads_batch(pads: list[int], kit) -> None:
-    """Fire multiple pads from a background thread with no per-pad thread overhead.
-
-    All WSL trigger files are written in a tight loop so the PowerShell watcher
-    picks them up in the same 5ms scan window, eliminating inter-pad jitter.
-    """
+    """Fire multiple pads with minimal jitter (call from a background thread)."""
     global _PS_AVAILABLE
     if _PS_AVAILABLE is None:
         _PS_AVAILABLE = bool(shutil.which("powershell.exe"))
@@ -232,19 +312,26 @@ def _trigger_pads_batch(pads: list[int], kit) -> None:
             if kit.pads[pad]:
                 server.play_pad(pad)
     else:
+        mixer = _get_stream_mixer() if _AUDIO else None
         for pad in pads:
             path = kit.pads[pad]
-            if path:
-                play_wav(path)  # simpleaudio / afplay are non-blocking
+            if not path:
+                continue
+            if mixer:
+                mixer.play(path)
+            else:
+                play_wav(path)
 
 
 def _preload_all(kit) -> None:
+    """Pre-load all kit samples so first playback has no latency."""
     if _WSL and shutil.which("powershell.exe"):
         server = _get_win_audio()
         for i, path in enumerate(kit.pads):
             if path:
                 server.preload(i, path)
     elif _AUDIO:
+        mixer = _get_stream_mixer()
         for path in kit.pads:
             if path:
-                threading.Thread(target=_cache_wav, args=(path,), daemon=True).start()
+                threading.Thread(target=mixer.load, args=(path,), daemon=True).start()

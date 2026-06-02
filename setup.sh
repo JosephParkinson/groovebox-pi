@@ -3,7 +3,7 @@ set -e
 
 # simpleaudio needs the ALSA dev headers on Linux
 if command -v apt-get &>/dev/null; then
-    sudo apt-get install -y libasound2-dev --quiet
+    sudo apt-get install -y libportaudio2 portaudio19-dev --quiet
 fi
 
 python3 -m venv .venv
