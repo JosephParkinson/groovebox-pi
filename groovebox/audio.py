@@ -239,17 +239,15 @@ class _StreamMixer:
                 break
 
         outdata.fill(0.0)
-        done = []
+        still_active = []
         for v in self._active:
             n = min(frames, len(v["data"]) - v["pos"])
             outdata[:n] += v["data"][v["pos"]: v["pos"] + n]
             v["pos"] += n
-            if v["pos"] >= len(v["data"]):
-                done.append(v)
-        for v in done:
-            self._active.remove(v)
+            if v["pos"] < len(v["data"]):
+                still_active.append(v)
+        self._active = still_active
 
-        # Soft clip to prevent inter-sample peaks from distorting
         np.clip(outdata, -1.0, 1.0, out=outdata)
 
 
