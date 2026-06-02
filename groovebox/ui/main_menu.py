@@ -1,19 +1,22 @@
 from ..constants import FG, FG_DIM, HIGHLIGHT, WHITE, WIDTH
 from ..kit import Kit
 from ..looper import LoopEngine
+from ..sequencer import Sequencer
 from ..settings import Settings
 from .base import Screen, centered_x
 from .instruments import InstrumentsScreen
 from .kits import KitsScreen
 from .looper_screen import LooperScreen
 from .play import PlayScreen
+from .sequencer_screen import SequencerScreen
 from .settings_screen import SettingsScreen
 
 
 class MainMenu(Screen):
-    def __init__(self, kit: Kit, engine: LoopEngine, settings: Settings):
+    def __init__(self, kit: Kit, engine: LoopEngine, seq: Sequencer, settings: Settings):
         self.kit      = kit
         self.engine   = engine
+        self.seq      = seq
         self.settings = settings
         self.selected = 0
         self._options = [
@@ -21,6 +24,7 @@ class MainMenu(Screen):
             ("INSTRUMENTS", lambda: InstrumentsScreen(self.kit)),
             ("KITS",        lambda: KitsScreen(self.kit)),
             ("LOOPER",      lambda: LooperScreen(self.kit, self.engine)),
+            ("SEQUENCER",   lambda: SequencerScreen(self.seq)),
             ("SETTINGS",    lambda: SettingsScreen(self.settings)),
         ]
 

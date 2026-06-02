@@ -8,6 +8,7 @@ from groovebox.audio import _WSL, _preload_all
 from groovebox.constants import WIDTH, HEIGHT, BG
 from groovebox.kit import Kit, _load_state
 from groovebox.looper import LoopEngine
+from groovebox.sequencer import Sequencer
 from groovebox.settings import Settings
 from groovebox.ui.base import Screen, find_font, pil_to_tk
 from groovebox.ui.main_menu import MainMenu
@@ -30,8 +31,9 @@ class Groovebox:
         kit      = Kit()
         _load_state(kit, settings)
         engine = LoopEngine(kit, settings)
+        seq    = Sequencer(kit)
 
-        self.stack: list[Screen] = [MainMenu(kit, engine, settings)]
+        self.stack: list[Screen] = [MainMenu(kit, engine, seq, settings)]
         self.tk_img   = None
         self.image_id = None
 
