@@ -1,7 +1,9 @@
 import shutil
 from pathlib import Path
 
-from ..audio import _WSL, _get_win_audio
+import threading
+
+from ..audio import _AUDIO, _WSL, _cache_wav, _get_win_audio
 from ..constants import (
     FG, FG_DIM, HIGHLIGHT, GREEN, WHITE, WIDTH, HEIGHT,
     PAD_COUNT, PAD_COLS, PAD_ROWS,
@@ -107,5 +109,7 @@ class PadAssignScreen(Screen):
             self.kit.pads[self.pad_index] = path
             if _WSL and shutil.which("powershell.exe"):
                 _get_win_audio().preload(self.pad_index, path)
+            elif _AUDIO:
+                threading.Thread(target=_cache_wav, args=(path,), daemon=True).start()
             return "back"
         return None

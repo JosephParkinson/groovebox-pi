@@ -162,6 +162,7 @@ class _WinAudioServer:
 
 
 _win_audio: _WinAudioServer | None = None
+_wav_obj_cache: dict[str, object] = {}  # path → simpleaudio.WaveObject
 
 
 def _get_win_audio() -> _WinAudioServer:
@@ -171,11 +172,23 @@ def _get_win_audio() -> _WinAudioServer:
     return _win_audio
 
 
+def _cache_wav(path: str) -> None:
+    """Read a WAV file into a WaveObject and cache it. Call from a background thread."""
+    if not _AUDIO or path in _wav_obj_cache:
+        return
+    try:
+        _wav_obj_cache[path] = simpleaudio.WaveObject.from_wave_file(path)
+    except Exception:
+        pass
+
+
 def play_wav(path: str) -> None:
     """Play a WAV file. Used on non-WSL platforms (Pi / Mac)."""
     if _AUDIO:
         try:
-            simpleaudio.WaveObject.from_wave_file(path).play()
+            if path not in _wav_obj_cache:
+                _wav_obj_cache[path] = simpleaudio.WaveObject.from_wave_file(path)
+            _wav_obj_cache[path].play()
             return
         except Exception:
             pass
@@ -231,3 +244,7 @@ def _preload_all(kit) -> None:
         for i, path in enumerate(kit.pads):
             if path:
                 server.preload(i, path)
+    elif _AUDIO:
+        for path in kit.pads:
+            if path:
+                threading.Thread(target=_cache_wav, args=(path,), daemon=True).start()
