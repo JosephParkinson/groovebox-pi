@@ -49,15 +49,24 @@ class MidiHandler:
         return True
 
     def _listen(self, port_name: str):
+        from groovebox.event_log import push as log_push
         try:
             with mido.open_input(port_name) as port:
                 for msg in port:
-                    if msg.type == "note_on" and self.on_note:
-                        self.on_note(msg.note, msg.velocity)
-                    elif msg.type == "note_off" and self.on_note:
-                        self.on_note(msg.note, 0)
-                    elif msg.type == "control_change" and self.on_cc:
-                        self.on_cc(msg.control, msg.value)
+                    if msg.type == "note_on":
+                        log_push("MIDI", f"note {msg.note} vel {msg.velocity}")
+                        if self.on_note:
+                            self.on_note(msg.note, msg.velocity)
+                    elif msg.type == "note_off":
+                        log_push("MIDI", f"note_off {msg.note}")
+                        if self.on_note:
+                            self.on_note(msg.note, 0)
+                    elif msg.type == "control_change":
+                        log_push("MIDI", f"cc {msg.control} val {msg.value}")
+                        if self.on_cc:
+                            self.on_cc(msg.control, msg.value)
+                    else:
+                        log_push("MIDI", str(msg)[:28])
         except Exception as e:
             print(f"MIDI error: {e}", file=sys.stderr)
 

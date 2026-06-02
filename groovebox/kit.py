@@ -9,13 +9,15 @@ KITS_DIR = Path("kits")
 class Kit:
     def __init__(self):
         self.pads: list[str | None] = [None] * PAD_COUNT
+        self.name: str              = ""
 
 
 def _kit_to_dict(kit: Kit) -> dict:
-    return {"pads": kit.pads}
+    return {"name": kit.name, "pads": kit.pads}
 
 
 def _dict_to_kit(kit: Kit, data: dict) -> None:
+    kit.name = data.get("name", "")
     pads = data.get("pads", [])
     kit.pads = [(p if p and Path(p).exists() else None) for p in pads]
     while len(kit.pads) < PAD_COUNT:
@@ -30,6 +32,10 @@ def _save_kit(kit: Kit, path: str) -> None:
 
 def _load_kit(kit: Kit, path: str) -> None:
     _dict_to_kit(kit, json.loads(Path(path).read_text()))
+
+
+def _delete_kit(path: str) -> None:
+    Path(path).unlink(missing_ok=True)
 
 
 def _read_state() -> dict:

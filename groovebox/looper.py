@@ -9,11 +9,12 @@ from .settings import Settings
 
 
 class ChanState:
-    EMPTY     = "empty"
-    PRIMED    = "primed"
-    COUNTING  = "counting"
-    RECORDING = "recording"
-    PLAYING   = "playing"
+    EMPTY       = "empty"
+    PRIMED      = "primed"
+    COUNTING    = "counting"
+    RECORDING   = "recording"
+    PLAYING     = "playing"
+    OVERDUBBING = "overdubbing"
 
 
 class LoopEvent:
@@ -28,10 +29,12 @@ class LoopChannel:
     VALID_BARS = (1, 2, 4, 8)
 
     def __init__(self):
-        self.state:  str      = ChanState.EMPTY
-        self.bars:   int      = 4
-        self.events: list     = []
-        self._fired: set[int] = set()
+        self.state:        str  = ChanState.EMPTY
+        self.bars:         int  = 4
+        self.events:       list = []
+        self._fired:       set  = set()
+        self.muted:        bool = False
+        self.overdub_mode: bool = False
 
     @property
     def beats(self) -> int:
@@ -41,7 +44,8 @@ class LoopChannel:
         self.state  = ChanState.EMPTY
         self.events = []
         self._fired = set()
-        # bars intentionally preserved across reset
+        self.muted  = False
+        # overdub_mode preserved — it's a per-channel preference, not state
 
 
 class LoopEngine:
@@ -58,9 +62,9 @@ class LoopEngine:
         self._ci_start  = 0.0
         self._ci_beat   = -1
         self._hat_path:    str | None = None
-        self._hat_setting: str        = ""  # sentinel — forces resolve on first call
+        self._hat_setting: str        = ""
         self._lock = threading.Lock()
-        threading.Thread(target=self._get_hat_path, daemon=True).start()  # warm up
+        threading.Thread(target=self._get_hat_path, daemon=True).start()
         threading.Thread(target=self._run, daemon=True).start()
 
     @property
@@ -72,25 +76,33 @@ class LoopEngine:
     def prime(self, ch: int) -> None:
         with self._lock:
             c = self.channels[ch]
-            if c.state != ChanState.EMPTY:
-                return
-            if self._phase == "idle":
-                c.state        = ChanState.COUNTING
-                self._phase    = "count_in"
-                self._ci_start = time.monotonic()
-                self._ci_beat  = -1
-            else:
-                c.state = ChanState.PRIMED
+            if c.state == ChanState.EMPTY:
+                if self._phase == "idle":
+                    c.state        = ChanState.COUNTING
+                    self._phase    = "count_in"
+                    self._ci_start = time.monotonic()
+                    self._ci_beat  = -1
+                else:
+                    c.state = ChanState.PRIMED
+            elif c.state == ChanState.PLAYING and c.overdub_mode:
+                c.state = ChanState.OVERDUBBING
+            elif c.state == ChanState.OVERDUBBING:
+                # Stop overdubbing: quantize newly added events and return to playing
+                grid = self.settings.quantize_beats
+                for ev in c.events:
+                    ev.beat = round(ev.beat / grid) * grid % c.beats
+                c.events.sort(key=lambda e: e.beat)
+                c.state = ChanState.PLAYING
 
     def note(self, pad: int) -> None:
-        """Play a pad hit and record it at its channel-relative beat position."""
+        """Play a pad hit and record it to all active recording/overdubbing channels."""
         _trigger_pad(pad, self.kit)
         with self._lock:
             if self._phase != "running":
                 return
             global_beat = (time.monotonic() - self._t0) / self.beat_dur
             for c in self.channels:
-                if c.state == ChanState.RECORDING:
+                if c.state in (ChanState.RECORDING, ChanState.OVERDUBBING):
                     c.events.append(LoopEvent(global_beat % c.beats, pad))
 
     def stop(self) -> None:
@@ -99,8 +111,23 @@ class LoopEngine:
             for c in self.channels:
                 c.reset()
 
+    def delete_channel(self, ch: int) -> None:
+        """Reset a single channel. Returns engine to idle if all channels become empty."""
+        with self._lock:
+            self.channels[ch].reset()
+            active = any(c.state != ChanState.EMPTY for c in self.channels)
+            if not active:
+                self._phase = "idle"
+
+    def toggle_mute(self, ch: int) -> None:
+        with self._lock:
+            self.channels[ch].muted = not self.channels[ch].muted
+
+    def toggle_overdub_mode(self, ch: int) -> None:
+        with self._lock:
+            self.channels[ch].overdub_mode = not self.channels[ch].overdub_mode
+
     def set_bars(self, ch: int, direction: int) -> None:
-        """Cycle bars count for an EMPTY channel. direction: +1 or -1."""
         with self._lock:
             c = self.channels[ch]
             if c.state == ChanState.EMPTY:
@@ -109,27 +136,24 @@ class LoopEngine:
                 c.bars = vals[(idx + direction) % len(vals)]
 
     def loop_pos(self) -> float | None:
-        """Global position 0.0–1.0 based on the longest active channel."""
         if self._phase != "running":
             return None
         active = [c.beats for c in self.channels
-                  if c.state in (ChanState.RECORDING, ChanState.PLAYING)]
+                  if c.state in (ChanState.RECORDING, ChanState.PLAYING, ChanState.OVERDUBBING)]
         max_beats = max(active) if active else 16
         global_beat = (time.monotonic() - self._t0) / self.beat_dur
         return (global_beat % max_beats) / max_beats
 
     def channel_pos(self, ch: int) -> float | None:
-        """0.0–1.0 through the channel's own loop cycle."""
         if self._phase != "running":
             return None
         c = self.channels[ch]
-        if c.state not in (ChanState.RECORDING, ChanState.PLAYING):
+        if c.state not in (ChanState.RECORDING, ChanState.PLAYING, ChanState.OVERDUBBING):
             return None
         global_beat = (time.monotonic() - self._t0) / self.beat_dur
         return (global_beat % c.beats) / c.beats
 
     def count_beat(self) -> int | None:
-        """0-3 during count-in, None otherwise."""
         if self._phase != "count_in":
             return None
         return min(3, int((time.monotonic() - self._ci_start) / self.beat_dur))
@@ -147,7 +171,6 @@ class LoopEngine:
         return str(candidates[0]) if candidates else None
 
     def _get_hat_path(self) -> str | None:
-        """Lazily resolve (and re-preload on WSL) whenever the setting changes."""
         ms = self.settings.metronome_sample
         if ms == self._hat_setting:
             return self._hat_path
@@ -189,8 +212,6 @@ class LoopEngine:
             if to_play:
                 hats = [x for x in to_play if x == "hat"]
                 pads = [x for x in to_play if x != "hat"]
-                # Single thread for the whole batch: all trigger files are written
-                # in one tight loop so the PS watcher sees them in the same scan window.
                 def _fire(hats=hats, pads=pads):
                     if hats:
                         self._play_hat()
@@ -237,7 +258,7 @@ class LoopEngine:
                     c._fired = set()
                 continue
 
-            if c.state not in (ChanState.RECORDING, ChanState.PLAYING):
+            if c.state not in (ChanState.RECORDING, ChanState.PLAYING, ChanState.OVERDUBBING):
                 continue
 
             old_cycle = int(old_global / N)
@@ -247,11 +268,12 @@ class LoopEngine:
 
             if wrapped:
                 # Drain unfired tail events from the previous cycle
-                if c.state == ChanState.PLAYING:
+                if c.state in (ChanState.PLAYING, ChanState.OVERDUBBING):
                     for i, ev in enumerate(c.events):
                         if i not in c._fired:
                             c._fired.add(i)
-                            result.append(ev.pad)
+                            if not c.muted:
+                                result.append(ev.pad)
                 # Transition RECORDING → PLAYING with quantisation applied
                 if c.state == ChanState.RECORDING:
                     c.state = ChanState.PLAYING
@@ -259,12 +281,14 @@ class LoopEngine:
                     for ev in c.events:
                         ev.beat = round(ev.beat / grid) * grid % c.beats
                     c.events.sort(key=lambda e: e.beat)
+                # OVERDUBBING stays as OVERDUBBING across loop boundaries
                 c._fired = set()
 
-            if c.state == ChanState.PLAYING:
+            if c.state in (ChanState.PLAYING, ChanState.OVERDUBBING):
                 for i, ev in enumerate(c.events):
                     if i not in c._fired and ev.beat <= new_pos:
                         c._fired.add(i)
-                        result.append(ev.pad)
+                        if not c.muted:
+                            result.append(ev.pad)
 
         return result

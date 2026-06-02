@@ -1,21 +1,23 @@
 import shutil
-from pathlib import Path
-
 import threading
+import time
+from pathlib import Path
 
 from ..audio import _WSL, _get_win_audio, preload_wav
 from ..constants import (
     FG, FG_DIM, HIGHLIGHT, GREEN, WHITE, WIDTH, HEIGHT,
     PAD_COUNT, PAD_COLS, PAD_ROWS,
 )
-from ..kit import Kit
+from ..kit import Kit, _save_kit
 from .base import Screen, centered_x, pad_rect
 
 
 class InstrumentsScreen(Screen):
-    def __init__(self, kit: Kit):
-        self.kit    = kit
-        self.cursor = 0
+    def __init__(self, kit: Kit, save_path: str | None = None):
+        self.kit       = kit
+        self.save_path = save_path
+        self.cursor    = 0
+        self._saved_at: float | None = None
 
     def draw(self, draw, font, small):
         draw.text((centered_x(draw, "INSTRUMENTS", font), 8), "INSTRUMENTS", fill=FG, font=font)
@@ -35,11 +37,20 @@ class InstrumentsScreen(Screen):
             draw.text((x0 + 4, y0 + 3), str(i + 1),
                       fill=WHITE if selected else FG_DIM, font=small)
 
-        sample    = self.kit.pads[self.cursor]
-        pad_label = Path(sample).stem[:20] if sample else "(empty)"
-        draw.text((8, 158), f"Pad {self.cursor + 1}: {pad_label}",
-                  fill=FG if sample else FG_DIM, font=small)
-        draw.text((8, 176), "Enter=assign   Bksp=back", fill=(75, 75, 75), font=small)
+        # Info row: show "Saved!" briefly after saving, else pad label
+        if self._saved_at and time.monotonic() - self._saved_at < 1.5:
+            draw.text((centered_x(draw, "Saved!", small), 158), "Saved!", fill=GREEN, font=small)
+        else:
+            sample    = self.kit.pads[self.cursor]
+            pad_label = Path(sample).stem[:20] if sample else "(empty)"
+            draw.text((8, 158), f"Pad {self.cursor + 1}: {pad_label}",
+                      fill=FG if sample else FG_DIM, font=small)
+
+        if self.save_path:
+            hint = "Enter=assign  s=save  Bksp=back"
+        else:
+            hint = "Enter=assign   Bksp=back"
+        draw.text((8, 176), hint, fill=(75, 75, 75), font=small)
 
     def handle_key(self, key):
         row, col = divmod(self.cursor, PAD_COLS)
@@ -53,6 +64,9 @@ class InstrumentsScreen(Screen):
             self.cursor -= 1
         elif key == "Right" and col < PAD_COLS - 1:
             self.cursor += 1
+        elif key == "s" and self.save_path:
+            _save_kit(self.kit, self.save_path)
+            self._saved_at = time.monotonic()
         elif key == "Return":
             return PadAssignScreen(self.kit, self.cursor)
         return None

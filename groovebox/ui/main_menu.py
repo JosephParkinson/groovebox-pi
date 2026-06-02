@@ -4,10 +4,8 @@ from ..looper import LoopEngine
 from ..sequencer import Sequencer
 from ..settings import Settings
 from .base import Screen, centered_x
-from .instruments import InstrumentsScreen
 from .kits import KitsScreen
 from .looper_screen import LooperScreen
-from .play import PlayScreen
 from .sequencer_screen import SequencerScreen
 from .settings_screen import SettingsScreen
 
@@ -20,18 +18,16 @@ class MainMenu(Screen):
         self.settings = settings
         self.selected = 0
         self._options = [
-            ("PLAY",        lambda: PlayScreen(self.kit)),
-            ("INSTRUMENTS", lambda: InstrumentsScreen(self.kit)),
-            ("KITS",        lambda: KitsScreen(self.kit)),
-            ("LOOPER",      lambda: LooperScreen(self.kit, self.engine)),
-            ("SEQUENCER",   lambda: SequencerScreen(self.seq)),
-            ("SETTINGS",    lambda: SettingsScreen(self.settings)),
+            ("PLAY",      lambda: LooperScreen(self.kit, self.engine)),
+            ("KITS",      lambda: KitsScreen(self.kit)),
+            ("SEQUENCER", lambda: SequencerScreen(self.seq)),
+            ("SETTINGS",  lambda: SettingsScreen(self.settings)),
         ]
 
     def draw(self, draw, font, small):
         title = "GROOVEBOX"
         draw.text((centered_x(draw, title, font), 8), title, fill=FG, font=font)
-        y = 50
+        y = 60
         for i, (label, _) in enumerate(self._options):
             bbox = draw.textbbox((0, 0), label, font=font)
             h = bbox[3] - bbox[1]
@@ -40,7 +36,7 @@ class MainMenu(Screen):
                 draw.text((28, y), label, fill=WHITE, font=font)
             else:
                 draw.text((28, y), label, fill=FG_DIM, font=font)
-            y += h + 16
+            y += h + 18
 
     def handle_key(self, key):
         if key == "Up":
