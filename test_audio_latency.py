@@ -35,8 +35,9 @@ try:
     import sounddevice as sd
     import soundfile as sf
     import numpy as np
-except ImportError:
-    print("sounddevice / soundfile / numpy not installed — run setup.sh first")
+except ImportError as _e:
+    print(f"Import error: {_e}")
+    print(f"Run with the venv Python: .venv/bin/python {Path(__file__).name}")
     sys.exit(1)
 
 

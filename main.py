@@ -4,7 +4,7 @@ import tkinter as tk
 
 from PIL import Image, ImageDraw
 
-from groovebox.audio import _WSL, _preload_all
+from groovebox.audio import _AUDIO, _WSL, _get_stream_mixer, _preload_all
 from groovebox.constants import WIDTH, HEIGHT, BG
 from groovebox.kit import Kit, _load_state
 from groovebox.looper import LoopEngine
@@ -37,8 +37,11 @@ class Groovebox:
         self.tk_img   = None
         self.image_id = None
 
-        if _WSL and shutil.which("powershell.exe"):
-            threading.Thread(target=lambda: _preload_all(kit), daemon=True).start()
+        # Start audio engine immediately so there's no first-trigger init delay
+        if _AUDIO:
+            _get_stream_mixer()
+        # Preload all kit samples on every platform
+        threading.Thread(target=lambda: _preload_all(kit), daemon=True).start()
 
         root.bind("<Key>", self._on_key)
         root.lift()

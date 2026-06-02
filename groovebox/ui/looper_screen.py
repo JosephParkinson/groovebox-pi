@@ -1,3 +1,6 @@
+import threading
+
+from ..audio import _preload_all
 from ..constants import (
     FG, FG_DIM, HIGHLIGHT, GREEN, WHITE, BG, WIDTH, HEIGHT,
     RED, AMBER, KEY_MAP,
@@ -17,6 +20,7 @@ class LooperScreen(Screen):
         self.kit    = kit
         self.engine = engine
         self.cursor = 0
+        threading.Thread(target=lambda: _preload_all(kit), daemon=True).start()
 
     # ── Drawing ───────────────────────────────────────────────────────────────
 

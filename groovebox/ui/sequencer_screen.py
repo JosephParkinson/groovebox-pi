@@ -1,3 +1,6 @@
+import threading
+
+from ..audio import _preload_all
 from ..constants import FG, FG_DIM, HIGHLIGHT, GREEN, WHITE, WIDTH, HEIGHT, KEY_MAP
 from ..sequencer import Sequencer
 from .base import Screen, centered_x
@@ -25,6 +28,7 @@ class SequencerScreen(Screen):
     def __init__(self, seq: Sequencer):
         self.seq    = seq
         self.cursor = 0   # selected step column (0-15)
+        threading.Thread(target=lambda: _preload_all(seq.kit), daemon=True).start()
 
     # ── Geometry helpers ─────────────────────────────────────────────────────
 
