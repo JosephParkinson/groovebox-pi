@@ -172,27 +172,40 @@ def _get_win_audio() -> _WinAudioServer:
 
 # ── Stream mixer (Mac / Pi) ───────────────────────────────────────────────────
 #
-# One always-running PortAudio output stream. Samples are pre-loaded as numpy
-# float32 arrays. Triggering a pad just appends a voice to a deque; the
-# callback mixes all active voices into each output block with zero per-trigger
-# overhead and no file I/O at playback time.
+# ── Stream-mixer configuration (set by configure() before the first trigger) ──
+# Low-latency mode:  22050 Hz / 128 blocks  → same ~5.8 ms block time, ~50% less CPU
+# High-quality mode: 44100 Hz / 256 blocks  → full bandwidth, more CPU
 #
-# On Raspberry Pi with onboard audio, increase BLOCKSIZE to 512 if you get
-# underruns. With an I2S DAC, 256 is stable.
+# Halving the sample rate keeps per-block latency identical (128/22050 ≈ 256/44100),
+# but the DSP work per block is halved and samples occupy half the memory.
+
+MIXER_SAMPLERATE: int = 22050   # default: low-latency
+MIXER_BLOCKSIZE:  int = 128
+
+
+def configure_audio(low_latency: bool) -> None:
+    """
+    Set sample-rate / block-size before the stream is created.
+    Has no effect once _get_stream_mixer() has been called.
+    """
+    global MIXER_SAMPLERATE, MIXER_BLOCKSIZE
+    if low_latency:
+        MIXER_SAMPLERATE, MIXER_BLOCKSIZE = 22050, 128
+    else:
+        MIXER_SAMPLERATE, MIXER_BLOCKSIZE = 44100, 256
+
 
 class _StreamMixer:
-    SAMPLERATE = 44100
-    BLOCKSIZE  = 256   # ~5.8 ms per block; raise to 512 on Pi onboard audio
-
     def __init__(self):
+        self._sr      = MIXER_SAMPLERATE
         self._samples: dict[str, "np.ndarray"] = {}
         self._queue:   deque = deque()   # main thread → callback, lockless
         self._active:  list  = []        # owned exclusively by the callback
         self._stream = sd.OutputStream(
-            samplerate=self.SAMPLERATE,
+            samplerate=self._sr,
             channels=2,
             dtype="float32",
-            blocksize=self.BLOCKSIZE,
+            blocksize=MIXER_BLOCKSIZE,
             latency="low",
             callback=self._callback,
         )
@@ -204,16 +217,14 @@ class _StreamMixer:
             return
         try:
             data, sr = sf.read(path, dtype="float32", always_2d=True)
-            # Upmix mono → stereo
             if data.shape[1] == 1:
                 data = np.repeat(data, 2, axis=1)
-            # Resample if sample rate doesn't match stream (linear, good enough for drums)
-            if sr != self.SAMPLERATE:
-                ratio = self.SAMPLERATE / sr
-                n = int(len(data) * ratio)
+            if sr != self._sr:
+                ratio = self._sr / sr
+                n     = int(len(data) * ratio)
                 old_x = np.arange(len(data))
                 new_x = np.linspace(0, len(data) - 1, n)
-                data = np.stack(
+                data  = np.stack(
                     [np.interp(new_x, old_x, data[:, c]) for c in range(data.shape[1])],
                     axis=1,
                 )
@@ -225,13 +236,12 @@ class _StreamMixer:
         """Queue a sample for immediate playback. Returns instantly."""
         data = self._samples.get(path)
         if data is None:
-            # Not preloaded — load async and skip this trigger to avoid blocking
             threading.Thread(target=self.load, args=(path,), daemon=True).start()
             return
         self._queue.append({"data": data, "pos": 0})
 
     def _callback(self, outdata: "np.ndarray", frames: int, time, status) -> None:
-        # Drain new triggers queued by the main thread (deque ops are GIL-atomic)
+        # GIL-atomic deque drain — no locking needed
         while self._queue:
             try:
                 self._active.append(self._queue.popleft())
@@ -248,7 +258,9 @@ class _StreamMixer:
                 still_active.append(v)
         self._active = still_active
 
-        np.clip(outdata, -1.0, 1.0, out=outdata)
+        # Clip only when multiple voices could sum above ±1.0
+        if len(still_active) > 1:
+            np.clip(outdata, -1.0, 1.0, out=outdata)
 
 
 _stream_mixer: _StreamMixer | None = None

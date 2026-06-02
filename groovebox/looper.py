@@ -61,6 +61,7 @@ class LoopEngine:
         self._t0        = 0.0
         self._ci_start  = 0.0
         self._ci_beat   = -1
+        self._preroll:  list[int]     = []  # pads hit within one grid step of downbeat
         self._hat_path:    str | None = None
         self._hat_setting: str        = ""
         self._lock = threading.Lock()
@@ -76,7 +77,14 @@ class LoopEngine:
     def prime(self, ch: int) -> None:
         with self._lock:
             c = self.channels[ch]
-            if c.state == ChanState.EMPTY:
+            was_overdubbing = c.state == ChanState.OVERDUBBING
+
+            # Any arm press stops ALL active overdubs
+            self._stop_all_overdubs()
+
+            if was_overdubbing:
+                pass  # press just stopped this channel's overdub; don't re-arm
+            elif c.state == ChanState.EMPTY:
                 if self._phase == "idle":
                     c.state        = ChanState.COUNTING
                     self._phase    = "count_in"
@@ -86,9 +94,12 @@ class LoopEngine:
                     c.state = ChanState.PRIMED
             elif c.state == ChanState.PLAYING and c.overdub_mode:
                 c.state = ChanState.OVERDUBBING
-            elif c.state == ChanState.OVERDUBBING:
-                # Stop overdubbing: quantize newly added events and return to playing
-                grid = self.settings.quantize_beats
+
+    def _stop_all_overdubs(self) -> None:
+        """Transition ALL OVERDUBBING channels to PLAYING. Must be called under _lock."""
+        grid = self.settings.quantize_beats
+        for c in self.channels:
+            if c.state == ChanState.OVERDUBBING:
                 for ev in c.events:
                     ev.beat = round(ev.beat / grid) * grid % c.beats
                 c.events.sort(key=lambda e: e.beat)
@@ -98,6 +109,15 @@ class LoopEngine:
         """Play a pad hit and record it to all active recording/overdubbing channels."""
         _trigger_pad(pad, self.kit)
         with self._lock:
+            if self._phase == "count_in":
+                # If the hit lands within one quantisation step of the downbeat,
+                # capture it for pre-roll so it appears at beat 0 when recording starts.
+                elapsed   = time.monotonic() - self._ci_start
+                remaining = 4 * self.beat_dur - elapsed
+                grid_dur  = self.settings.quantize_beats * self.beat_dur
+                if 0 < remaining <= grid_dur:
+                    self._preroll.append(pad)
+                return
             if self._phase != "running":
                 return
             global_beat = (time.monotonic() - self._t0) / self.beat_dur
@@ -108,6 +128,7 @@ class LoopEngine:
     def stop(self) -> None:
         with self._lock:
             self._phase = "idle"
+            self._preroll.clear()
             for c in self.channels:
                 c.reset()
 
@@ -199,6 +220,11 @@ class LoopEngine:
     # ── Background timing thread ──────────────────────────────────────────────
 
     def _run(self) -> None:
+        import os
+        try:
+            os.nice(-5)   # ask the scheduler to favour this thread; ignored without CAP_SYS_NICE
+        except (PermissionError, OSError, AttributeError):
+            pass
         last = time.monotonic()
         while True:
             time.sleep(0.004)
@@ -230,10 +256,12 @@ class LoopEngine:
         if elapsed >= 4 * self.beat_dur:
             self._t0    = self._ci_start + 4 * self.beat_dur
             self._phase = "running"
+            seed = [LoopEvent(0.0, p) for p in self._preroll]
+            self._preroll.clear()
             for c in self.channels:
                 if c.state in (ChanState.COUNTING, ChanState.PRIMED):
                     c.state  = ChanState.RECORDING
-                    c.events = []
+                    c.events = list(seed)   # beat-0 pre-roll events
                     c._fired = set()
         return result
 
@@ -248,7 +276,7 @@ class LoopEngine:
         if self.metronome and int(new_global) > int(old_global):
             result.append("hat")
 
-        for c in self.channels:
+        for i, c in enumerate(self.channels):
             N = c.beats
 
             if c.state == ChanState.PRIMED:
@@ -274,13 +302,17 @@ class LoopEngine:
                             c._fired.add(i)
                             if not c.muted:
                                 result.append(ev.pad)
-                # Transition RECORDING → PLAYING with quantisation applied
+                # Transition RECORDING → PLAYING (or OVERDUBBING if mode is on)
                 if c.state == ChanState.RECORDING:
-                    c.state = ChanState.PLAYING
                     grid = self.settings.quantize_beats
                     for ev in c.events:
                         ev.beat = round(ev.beat / grid) * grid % c.beats
                     c.events.sort(key=lambda e: e.beat)
+                    if c.overdub_mode:
+                        self._stop_all_overdubs()
+                        c.state = ChanState.OVERDUBBING
+                    else:
+                        c.state = ChanState.PLAYING
                 # OVERDUBBING stays as OVERDUBBING across loop boundaries
                 c._fired = set()
 

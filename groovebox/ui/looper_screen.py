@@ -3,140 +3,195 @@ import time
 
 from ..audio import _preload_all
 from ..constants import (
-    FG, FG_DIM, HIGHLIGHT, GREEN, WHITE, BG, WIDTH, HEIGHT,
+    FG, FG_DIM, HIGHLIGHT, GREEN, WHITE, BG, WIDTH,
     RED, AMBER, KEY_MAP,
 )
 from ..kit import Kit
 from ..looper import LoopEngine, ChanState
-from .base import Screen, centered_x
+from .base import Screen
 
-_OVERDUP_FILL  = (0, 80, 120)   # dark teal: playing + recording simultaneously
-_HOLD_SECS     = 0.7            # hold duration to trigger delete
+_HOLD_SECS  = 0.7
+
+# Muted state overrides all other colours
+_MUTED_FILL = (72, 72, 72)
+_MUTED_BDR  = (110, 110, 110)
+
+# (fill_color, border_color) per state
+# fill=None means the bar is drawn specially (empty or progressive)
+_STYLE = {
+    ChanState.EMPTY:       (None,      (38, 38, 38)),
+    ChanState.PRIMED:      ((50, 40, 0), AMBER),
+    ChanState.COUNTING:    (None,      AMBER),       # progressive amber fill
+    ChanState.RECORDING:   (RED,       RED),          # progressive red fill
+    ChanState.PLAYING:     (GREEN,     GREEN),
+    ChanState.OVERDUBBING: (HIGHLIGHT, HIGHLIGHT),
+}
+
+# Global position strip (thin bar above the channel bars)
+_PS_X0 = 4
+_PS_X1 = WIDTH - 4
+_PS_Y  = 22   # top edge
+_PS_H  = 4    # height in px
+
+# Bar geometry — 4 bars below the position strip
+_BX0 = 3
+_BX1 = WIDTH - 3
+_BY0 = 30    # top of first bar (leaves a 4px gap after the position strip)
+_BH  = 48    # bar height (px)
+_GAP = 5     # gap between bars
+
+
+def _bar_y(idx: int) -> tuple[int, int]:
+    y0 = _BY0 + idx * (_BH + _GAP)
+    return y0, y0 + _BH - 1
 
 
 class LooperScreen(Screen):
-    _BAR_X  = 18
-    _BAR_W  = 128
-    _BAR_H  = 14
-    _ROW_Y  = [48, 72, 96, 120]
 
     def __init__(self, kit: Kit, engine: LoopEngine):
         self.kit         = kit
         self.engine      = engine
         self.cursor      = 0
-        self._press_times: dict[int, float] = {}
+        self._press_times:  dict[int, float] = {}
+        self._hold_deleted: set[int]         = set()
         threading.Thread(target=lambda: _preload_all(kit), daemon=True).start()
+        threading.Thread(target=self._hold_watcher, daemon=True).start()
+
+    def _hold_watcher(self) -> None:
+        while True:
+            time.sleep(0.025)
+            now = time.monotonic()
+            for ch, t in list(self._press_times.items()):
+                if now - t >= _HOLD_SECS:
+                    self._press_times.pop(ch, None)
+                    self._hold_deleted.add(ch)
+                    self.engine.delete_channel(ch)
 
     # ── Drawing ───────────────────────────────────────────────────────────────
 
     def draw(self, draw, font, small):
-        draw.text((6, 6), "PLAY", fill=FG, font=font)
+        # Title row: label left, metronome + BPM right
+        draw.text((6, 4), "PLAY", fill=FG, font=font)
+        met_sym = "●" if self.engine.metronome else "○"
+        bpm_txt = f"{met_sym} {int(self.engine.bpm)}"
+        bb = draw.textbbox((0, 0), bpm_txt, font=small)
+        draw.text((WIDTH - bb[2] - 6, 8), bpm_txt,
+                  fill=HIGHLIGHT if self.engine.metronome else FG_DIM, font=small)
 
-        met     = "● " if self.engine.metronome else "○ "
-        bpm_txt = met + str(int(self.engine.bpm))
-        bx = draw.textbbox((0, 0), bpm_txt, font=small)
-        draw.text((WIDTH - bx[2] - 4, 10), bpm_txt,
-                  fill=HIGHLIGHT if self.engine.metronome else FG, font=small)
+        self._draw_pos_strip(draw)
 
-        self._draw_pos_bar(draw)
         now = time.monotonic()
-        for i, y in enumerate(self._ROW_Y):
-            held = self._hold_progress(i, now)
-            self._draw_channel(draw, small, i, y, held)
-
-        hint = "1-4:arm x:mute o:OD ←→:bars -=:bpm m:met r:rst"
-        draw.text((centered_x(draw, hint, small), HEIGHT - 22), hint, fill=(65, 65, 65), font=small)
-
-    def _draw_pos_bar(self, draw) -> None:
-        bx, by, bw, bh = 4, 28, WIDTH - 8, 8
-        draw.rectangle([bx, by, bx + bw, by + bh], outline=FG_DIM)
-        cb = self.engine.count_beat()
-        lp = self.engine.loop_pos()
-        if cb is not None:
-            sw = bw // 4
-            for i in range(4):
-                if i <= cb:
-                    draw.rectangle([bx + i * sw, by, bx + (i + 1) * sw, by + bh], fill=AMBER)
-        elif lp is not None:
-            fw = int(lp * bw)
-            if fw > 0:
-                draw.rectangle([bx, by, bx + fw, by + bh], fill=HIGHLIGHT)
+        for i in range(4):
+            y0, y1 = _bar_y(i)
+            self._draw_bar(draw, small, i, y0, y1, self._hold_progress(i, now))
 
     def _hold_progress(self, ch: int, now: float) -> float:
         t = self._press_times.get(ch)
-        if t is None:
-            return 0.0
-        return min(1.0, (now - t) / _HOLD_SECS)
+        return min(1.0, (now - t) / _HOLD_SECS) if t is not None else 0.0
 
-    def _draw_channel(self, draw, small, idx: int, y: int, held: float) -> None:
+    def _draw_pos_strip(self, draw) -> None:
+        """Thin global-position strip between the title and the channel bars."""
+        pw = _PS_X1 - _PS_X0
+        draw.rectangle([_PS_X0, _PS_Y, _PS_X1, _PS_Y + _PS_H - 1], outline=(40, 40, 40))
+        cb = self.engine.count_beat()
+        lp = self.engine.loop_pos()
+        if cb is not None:
+            # Count-in: fill amber one quarter at a time
+            sw = pw // 4
+            for i in range(cb + 1):
+                draw.rectangle(
+                    [_PS_X0 + i * sw, _PS_Y, _PS_X0 + (i + 1) * sw, _PS_Y + _PS_H - 1],
+                    fill=AMBER,
+                )
+        elif lp is not None and lp > 0:
+            fw = int(lp * pw)
+            draw.rectangle([_PS_X0, _PS_Y, _PS_X0 + fw, _PS_Y + _PS_H - 1], fill=HIGHLIGHT)
+
+    def _draw_hit_markers(self, draw, ch) -> None:
+        """Small dots at each recorded event's beat position, centred vertically."""
+        events = list(ch.events)   # snapshot — safe for display reads
+        if not events:
+            return
+        y0, y1   = _bar_y(self.engine.channels.index(ch))
+        cy       = (y0 + y1) // 2
+        bw       = _BX1 - _BX0
+        dot_col  = (190, 190, 190) if not ch.muted else (130, 130, 130)
+        r        = 2
+        for ev in events:
+            px = _BX0 + int(ev.beat / ch.beats * bw)
+            draw.ellipse([px - r, cy - r, px + r, cy + r], fill=dot_col)
+
+    def _draw_bar(self, draw, small, idx: int, y0: int, y1: int, held: float) -> None:
         ch    = self.engine.channels[idx]
         state = ch.state
         sel   = idx == self.cursor
+        bw    = _BX1 - _BX0   # usable pixel width
 
-        state_cfg = {
-            ChanState.EMPTY:       ("—",    FG_DIM,    None,          None),
-            ChanState.PRIMED:      ("WAIT", AMBER,     None,          AMBER),
-            ChanState.COUNTING:    ("CNT",  AMBER,     None,          AMBER),
-            ChanState.RECORDING:   ("REC",  RED,       RED,           RED),
-            ChanState.PLAYING:     ("PLAY", GREEN,     GREEN,         GREEN),
-            ChanState.OVERDUBBING: ("OVD",  HIGHLIGHT, _OVERDUP_FILL, HIGHLIGHT),
-        }
-        label, lbl_col, fill_col, border_col = state_cfg.get(state, ("?", FG_DIM, None, FG_DIM))
-
-        # Dim bar when muted
-        if ch.muted and fill_col:
-            fill_col   = FG_DIM
-            border_col = FG_DIM
-
-        # Selection indicator
-        if sel:
-            draw.rectangle([2, y - 1, 17, y + self._BAR_H + 1], fill=FG_DIM)
-            draw.text((4, y + 1), str(idx + 1), fill=BG, font=small)
+        if ch.muted:
+            fill_col   = _MUTED_FILL
+            border_col = _MUTED_BDR
         else:
-            draw.text((4, y + 1), str(idx + 1), fill=lbl_col, font=small)
+            fill_col, border_col = _STYLE.get(state, (None, (38, 38, 38)))
 
-        # Progress bar
-        bx, bw, bh = self._BAR_X, self._BAR_W, self._BAR_H
-        draw.rectangle([bx, y, bx + bw, y + bh], outline=border_col or FG_DIM)
+        # ── Base rectangle ────────────────────────────────────────────────────
+        # Always draw background as BG so progressive fills start clean
+        draw.rectangle([_BX0, y0, _BX1, y1], fill=BG, outline=border_col)
+
         pos = self.engine.channel_pos(idx)
-        if pos is not None and fill_col:
-            fw = int(pos * bw)
-            if state == ChanState.PLAYING:
-                draw.rectangle([bx, y, bx + bw, y + bh], fill=fill_col)
-                cx = bx + fw
-                draw.line([(cx, y), (cx, y + bh)], fill=WHITE, width=2)
-            elif state == ChanState.OVERDUBBING:
-                draw.rectangle([bx, y, bx + bw, y + bh], fill=fill_col)
-                cx = bx + fw
-                draw.line([(cx, y), (cx, y + bh)], fill=WHITE, width=2)
-            elif state == ChanState.RECORDING and fw > 0:
-                draw.rectangle([bx, y, bx + fw, y + bh], fill=fill_col)
 
-        # Hold-to-delete progress: red strip along bottom of bar
+        # ── State-specific fill ───────────────────────────────────────────────
+        if ch.muted:
+            draw.rectangle([_BX0, y0, _BX1, y1], fill=fill_col)
+
+        elif state == ChanState.PRIMED:
+            draw.rectangle([_BX0, y0, _BX1, y1], fill=fill_col)
+
+        elif state == ChanState.COUNTING:
+            cb = self.engine.count_beat()
+            if cb is not None:
+                fw = int((cb + 1) / 4 * bw)
+                draw.rectangle([_BX0, y0, _BX0 + fw, y1], fill=AMBER)
+
+        elif state == ChanState.RECORDING:
+            if pos is not None and pos > 0:
+                fw = int(pos * bw)
+                draw.rectangle([_BX0, y0, _BX0 + fw, y1], fill=RED)
+            self._draw_hit_markers(draw, ch)
+
+        elif state in (ChanState.PLAYING, ChanState.OVERDUBBING):
+            draw.rectangle([_BX0, y0, _BX1, y1], fill=fill_col)
+            self._draw_hit_markers(draw, ch)
+            if pos is not None:
+                cx = _BX0 + int(pos * bw)
+                draw.line([(cx, y0 + 4), (cx, y1 - 4)], fill=WHITE, width=2)
+
+        # ── Redraw border on top of fill so it's always crisp ─────────────────
+        draw.rectangle([_BX0, y0, _BX1, y1], outline=border_col)
+
+        # ── Selection: thin white inner outline ───────────────────────────────
+        if sel:
+            draw.rectangle([_BX0, y0, _BX1, y1], outline=WHITE)
+
+        # ── Hold-to-delete: red strip growing along the bottom edge ───────────
         if held > 0:
             fw = int(held * bw)
-            draw.rectangle([bx, y + bh - 2, bx + fw, y + bh], fill=RED)
+            draw.rectangle([_BX0, y1 - 3, _BX0 + fw, y1], fill=RED)
 
-        # State label
-        draw.text((150, y + 1), label, fill=lbl_col, font=small)
-
-        # Mute indicator
-        if ch.muted:
-            draw.text((183, y + 1), "M", fill=RED, font=small)
-
-        # Overdub mode indicator
+        # ── Overdub mode indicator (top-right, inside bar) ────────────────────
         if ch.overdub_mode:
-            draw.text((196, y + 1), "O", fill=HIGHLIGHT, font=small)
+            od_col = WHITE if state == ChanState.OVERDUBBING else (80, 110, 200)
+            draw.text((_BX1 - 13, y0 + 4), "O", fill=od_col, font=small)
 
-        # Bars label
-        bar_txt = f"{ch.bars}b"
-        bar_col = FG if state == ChanState.EMPTY else FG_DIM
-        draw.text((210, y + 1), bar_txt, fill=bar_col, font=small)
+        # ── Loop length (bottom-right, inside bar) ────────────────────────────
+        bars_txt = f"{ch.bars}b"
+        tb = draw.textbbox((0, 0), bars_txt, font=small)
+        tw = tb[2] - tb[0]
+        txt_col = WHITE if state != ChanState.EMPTY else FG_DIM
+        draw.text((_BX1 - tw - 6, y1 - 14), bars_txt, fill=txt_col, font=small)
 
     # ── Input ─────────────────────────────────────────────────────────────────
 
     def handle_key(self, key):
-        k = key.lower()
         if key == "BackSpace":
             return "back"
         elif key == "Up":
@@ -161,15 +216,17 @@ class LooperScreen(Screen):
             self.engine.bpm = min(300.0, self.engine.bpm + 1)
         elif key in "1234":
             ch = int(key) - 1
-            self._press_times[ch] = time.monotonic()
-            self.engine.prime(ch)
-        elif k in KEY_MAP:
-            self.engine.note(KEY_MAP[k])
+            if ch in self._hold_deleted:
+                pass
+            elif ch not in self._press_times:
+                self._press_times[ch] = time.monotonic()
+                self.engine.prime(ch)
+        elif key.lower() in KEY_MAP:
+            self.engine.note(KEY_MAP[key.lower()])
         return None
 
     def handle_keyup(self, key):
         if key in "1234":
             ch = int(key) - 1
-            t  = self._press_times.pop(ch, None)
-            if t is not None and time.monotonic() - t >= _HOLD_SECS:
-                self.engine.delete_channel(ch)
+            self._press_times.pop(ch, None)
+            self._hold_deleted.discard(ch)

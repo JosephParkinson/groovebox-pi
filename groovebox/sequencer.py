@@ -52,6 +52,11 @@ class Sequencer:
         return self._step if self._running else None
 
     def _run(self) -> None:
+        import os
+        try:
+            os.nice(-5)
+        except (PermissionError, OSError, AttributeError):
+            pass
         while True:
             time.sleep(0.004)
             with self._lock:

@@ -12,6 +12,10 @@ Input sources (all active regardless of display mode):
   Keyboard  — routed through tkinter in GUI mode, unavailable in headless mode
   GPIO      — Pirate Audio A/B/X/Y buttons, mapped to Up/Down/Return/BackSpace
   MIDI      — reserved for future AKAI MPK Mini integration
+
+Low-latency mode (Settings → Low Latency):
+  ON  (default): 22050 Hz / 128-block audio, 15 fps UI, LCD at ~7.5 fps
+  OFF:           44100 Hz / 256-block audio, 25 fps UI, LCD mirrored each frame
 """
 
 import os
@@ -21,7 +25,7 @@ import time
 
 from PIL import Image, ImageDraw
 
-from groovebox.audio import _AUDIO, _WSL, _get_stream_mixer, _preload_all
+from groovebox.audio import _AUDIO, _WSL, _get_stream_mixer, _preload_all, configure_audio
 from groovebox.constants import WIDTH, HEIGHT, BG
 from groovebox.event_log import push as log_push
 from groovebox.hardware import (
@@ -35,6 +39,13 @@ from groovebox.settings import Settings
 from groovebox.ui.base import Screen, find_font, pil_to_tk
 from groovebox.ui.main_menu import MainMenu
 
+# ImageTk gives ~3–5× faster tkinter updates than the PPM fallback.
+try:
+    from PIL.ImageTk import PhotoImage as _TkPhoto
+    _HAS_IMAGE_TK = True
+except ImportError:
+    _HAS_IMAGE_TK = False
+
 
 # ── Detect whether a display server is available ─────────────────────────────
 
@@ -42,19 +53,23 @@ def _has_display() -> bool:
     return bool(
         os.environ.get("DISPLAY")
         or os.environ.get("WAYLAND_DISPLAY")
-        or sys.platform == "darwin"   # macOS always has a window server
+        or sys.platform == "darwin"
     )
 
 
 # ── Shared state factory ──────────────────────────────────────────────────────
 
 def _build_app_state():
-    """Create all shared model objects and return (kit, engine, seq, settings, font, small)."""
+    """Create all shared model objects and configure audio before the stream opens."""
     font  = find_font(16)
     small = find_font(12)
     settings = Settings()
     kit      = Kit()
     _load_state(kit, settings)
+
+    # Must happen before _get_stream_mixer() is called
+    configure_audio(settings.low_latency)
+
     engine = LoopEngine(kit, settings)
     seq    = Sequencer(kit)
     return kit, engine, seq, settings, font, small
@@ -69,7 +84,6 @@ def _start_audio(kit):
 # ── Screen-stack helper ───────────────────────────────────────────────────────
 
 def _apply_result(stack: list, result) -> None:
-    """Mutate stack based on handle_key return value."""
     if result == "back":
         if len(stack) > 1:
             stack.pop()
@@ -83,6 +97,14 @@ def _apply_result(stack: list, result) -> None:
 # ── Tkinter mode ─────────────────────────────────────────────────────────────
 
 class Groovebox:
+    # Tick intervals
+    _TICK_LO  = 66    # ms — 15 fps  (low-latency mode: minimal GIL hold time)
+    _TICK_HI  = 40    # ms — 25 fps  (high-quality mode)
+
+    # How many UI ticks between LCD pushes
+    _LCD_SKIP_LO = 2  # ~7.5 fps LCD in low-latency mode
+    _LCD_SKIP_HI = 1  # match UI tick in high-quality mode
+
     def __init__(self, root):
         import tkinter as tk
         self.root = root
@@ -99,12 +121,18 @@ class Groovebox:
         self.stack: list[Screen] = [
             MainMenu(self.kit, self.engine, self.seq, self.settings)
         ]
-        self.tk_img   = None
-        self.image_id = None
+
+        self._tk_photo     = None   # PIL.ImageTk.PhotoImage (reused every frame)
+        self._use_image_tk = _HAS_IMAGE_TK  # disabled at runtime if ImageTk fails
+        self.image_id      = None
+        self._lcd_cnt      = 0
+        self._pending_keyup: dict[str, object] = {}
+
+        # Pick tick rate from settings
+        self._tick_ms  = self._TICK_LO  if self.settings.low_latency else self._TICK_HI
+        self._lcd_skip = self._LCD_SKIP_LO if self.settings.low_latency else self._LCD_SKIP_HI
 
         _start_audio(self.kit)
-
-        # Wire GPIO buttons so they feed into the same handle_key pipeline
         init_buttons(self._gpio_key)
 
         root.bind("<Key>",        self._on_key)
@@ -114,10 +142,12 @@ class Groovebox:
         self._tick()
 
     def _gpio_key(self, keysym: str) -> None:
-        """Called from a background thread when a GPIO button is pressed."""
         self.root.after(0, lambda k=keysym: self._dispatch(k))
 
     def _on_key(self, event):
+        if event.keysym in self._pending_keyup:
+            self.root.after_cancel(self._pending_keyup.pop(event.keysym))
+
         log_push("KEY", event.keysym)
         result = self.stack[-1].handle_key(event.keysym) if self.stack else None
         if result is None and event.char and event.char != event.keysym:
@@ -125,11 +155,17 @@ class Groovebox:
         _apply_result(self.stack, result)
 
     def _on_keyup(self, event):
+        key = event.keysym
+        if key in self._pending_keyup:
+            self.root.after_cancel(self._pending_keyup.pop(key))
+        self._pending_keyup[key] = self.root.after(30, lambda k=key: self._confirm_keyup(k))
+
+    def _confirm_keyup(self, key: str) -> None:
+        self._pending_keyup.pop(key, None)
         if self.stack:
-            self.stack[-1].handle_keyup(event.keysym)
+            self.stack[-1].handle_keyup(key)
 
     def _dispatch(self, keysym: str) -> None:
-        """Route a synthetic key event (from GPIO) as if it came from the keyboard."""
         if self.stack:
             _apply_result(self.stack, self.stack[-1].handle_key(keysym))
 
@@ -143,25 +179,47 @@ class Groovebox:
     def _tick(self):
         img = self._render()
 
-        # Mirror to Pirate Audio LCD if fitted
+        # LCD: push at a reduced rate to avoid consuming a full core on SPI
         if lcd_available():
-            display_image(img)
+            self._lcd_cnt += 1
+            if self._lcd_cnt >= self._lcd_skip:
+                self._lcd_cnt = 0
+                display_image(img)
 
-        self.tk_img = pil_to_tk(img)
-        if self.image_id is None:
-            self.image_id = self.canvas.create_image(0, 0, anchor="nw", image=self.tk_img)
-        else:
-            self.canvas.itemconfig(self.image_id, image=self.tk_img)
-        self.root.after(33, self._tick)
+        # Tkinter display: try ImageTk in-place paste; fall back to PPM on failure.
+        # PIL._imagingtk may not be compiled against the venv's Tk on all platforms
+        # (common on WSL / dev machines).  We detect this on the first frame and
+        # stay on the PPM path for the rest of the session.
+        if self._use_image_tk:
+            try:
+                if self._tk_photo is None:
+                    self._tk_photo = _TkPhoto(img)
+                    self.image_id  = self.canvas.create_image(
+                        0, 0, anchor="nw", image=self._tk_photo
+                    )
+                else:
+                    self._tk_photo.paste(img)
+            except Exception:
+                # ImageTk not usable in this environment — disable and fall through
+                self._use_image_tk = False
+                self._tk_photo     = None
+
+        if not self._use_image_tk:
+            tk_img = pil_to_tk(img)
+            if self.image_id is None:
+                self.image_id = self.canvas.create_image(
+                    0, 0, anchor="nw", image=tk_img
+                )
+            else:
+                self.canvas.itemconfig(self.image_id, image=tk_img)
+            self._tk_photo = tk_img   # keep reference alive
+
+        self.root.after(self._tick_ms, self._tick)
 
 
 # ── Headless mode (Pi without HDMI) ──────────────────────────────────────────
 
 def run_headless() -> None:
-    """
-    Render directly to the Pirate Audio LCD at ~30 fps.
-    Input comes only from GPIO buttons (and MIDI in future).
-    """
     print("[headless] Starting without display server.", file=sys.stderr)
 
     if not init_display():
@@ -180,16 +238,17 @@ def run_headless() -> None:
 
     init_buttons(on_gpio_key)
 
-    frame_time = 1.0 / 30
+    frame_ms  = 66 if settings.low_latency else 40
+    frame_sec = frame_ms / 1000.0
     while True:
-        t0 = time.monotonic()
+        t0   = time.monotonic()
         img  = Image.new("RGB", (WIDTH, HEIGHT), BG)
         draw = ImageDraw.Draw(img)
         if stack:
             stack[-1].draw(draw, font, small)
         display_image(img)
         elapsed = time.monotonic() - t0
-        sleep   = max(0.0, frame_time - elapsed)
+        sleep   = max(0.0, frame_sec - elapsed)
         if sleep:
             time.sleep(sleep)
 
@@ -197,8 +256,7 @@ def run_headless() -> None:
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 def main():
-    # Always try to initialise hardware (no-op if not on Pi)
-    init_display()
+    init_display()   # no-op if ST7789 not present
 
     if "--headless" in sys.argv or not _has_display():
         run_headless()

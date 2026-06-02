@@ -72,3 +72,6 @@ def _load_state(kit: Kit, settings) -> None:
     ms = data.get("metronome_sample", "(auto)")
     if ms == "(auto)" or (isinstance(ms, str) and Path(ms).exists()):
         settings.metronome_sample = ms
+    ll = data.get("low_latency")
+    if isinstance(ll, bool):
+        settings.low_latency = ll

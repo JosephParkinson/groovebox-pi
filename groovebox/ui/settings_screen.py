@@ -14,9 +14,12 @@ class SettingsScreen(Screen):
         ) if Path("samples").exists() else ("(auto)",)
         # Value rows: (label, attr, options_tuple, display_fn)
         self._rows = [
-            ("Quantize", "quantize",        Settings.QUANTIZE_OPTIONS, lambda v: v),
-            ("Metro",    "metronome_sample", wav_opts,
+            ("Quantize",    "quantize",        Settings.QUANTIZE_OPTIONS,
+             lambda v: v),
+            ("Metro",       "metronome_sample", wav_opts,
              lambda v: "(auto)" if v == "(auto)" else Path(v).stem[:14]),
+            ("Low Latency", "low_latency",      (False, True),
+             lambda v: "On" if v else "Off"),
         ]
         # Total cursor positions = len(value rows) + 1 (Debug action)
         self._debug_idx = len(self._rows)
