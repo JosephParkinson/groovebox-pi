@@ -64,11 +64,10 @@ class LoopChannel:
         self.muted:        bool = False
         self.overdub_mode: bool = False
         # Sequence track fields (populated by LoopEngine.load_seq_track)
-        self.is_seq_track:  bool       = False
-        self.seq_name:      str        = ""
-        self.seq_one_shot:  bool       = False   # True → play once then go EMPTY
-        self.seq_grid:      list | None = None   # raw grid for bar-count re-gen
-        self._seq_play_t0:  float      = 0.0     # >0 when one-shot triggered immediately
+        self.is_seq_track: bool        = False
+        self.seq_name:     str         = ""
+        self.seq_one_shot: bool        = False   # True → play once then go EMPTY
+        self.seq_grid:     list | None = None    # raw grid for bar-count re-gen
 
     @property
     def beats(self) -> int:
@@ -79,11 +78,10 @@ class LoopChannel:
         self.events       = []
         self._fired       = set()
         self.muted        = False
-        self.is_seq_track  = False
-        self.seq_name      = ""
-        self.seq_one_shot  = False
-        self.seq_grid      = None
-        self._seq_play_t0  = 0.0
+        self.is_seq_track = False
+        self.seq_name     = ""
+        self.seq_one_shot = False
+        self.seq_grid     = None
         # overdub_mode preserved — it's a per-channel preference, not state
 
 
@@ -130,10 +128,12 @@ class LoopEngine:
                     self._ci_start = time.monotonic()
                     self._ci_beat  = -1
                 elif c.is_seq_track and c.seq_one_shot:
-                    # Fill: fire immediately — don't wait for bar boundary
-                    c.state         = ChanState.PLAYING
-                    c._fired        = set()
-                    c._seq_play_t0  = time.monotonic()
+                    # Fill: start immediately, locked to the current bar position.
+                    # Pre-fire events that are already behind us so only the
+                    # remaining portion of the bar plays — completes at bar end.
+                    bar_pos = (time.monotonic() - self._t0) / self.beat_dur % 4.0
+                    c._fired = {j for j, ev in enumerate(c.events) if ev.beat < bar_pos}
+                    c.state  = ChanState.PLAYING
                 else:
                     c.state = ChanState.PRIMED
             elif c.state == ChanState.PLAYING and c.overdub_mode and not c.is_seq_track:
@@ -281,8 +281,6 @@ class LoopEngine:
         c = self.channels[ch]
         if c.state not in (ChanState.RECORDING, ChanState.PLAYING, ChanState.OVERDUBBING):
             return None
-        if c.is_seq_track and c.seq_one_shot and c._seq_play_t0 > 0:
-            return min(1.0, (time.monotonic() - c._seq_play_t0) / (4.0 * self.beat_dur))
         global_beat = (time.monotonic() - self._t0) / self.beat_dur
         return (global_beat % c.beats) / c.beats
 
@@ -393,23 +391,6 @@ class LoopEngine:
             result.append("hat")
 
         for c in self.channels:
-            # Immediately-triggered one-shot fills use their own start clock,
-            # not the global loop timeline — handle them separately.
-            if (c.is_seq_track and c.seq_one_shot
-                    and c._seq_play_t0 > 0 and c.state == ChanState.PLAYING):
-                play_pos = (now - c._seq_play_t0) / bd
-                for j, ev in enumerate(c.events):
-                    if j not in c._fired and ev.beat <= play_pos:
-                        c._fired.add(j)
-                        if not c.muted:
-                            result.append(ev.pad)
-                if play_pos >= 4.0:   # one bar = 4 beats — sequence complete
-                    c.state        = ChanState.EMPTY
-                    c._seq_play_t0 = 0.0
-                    if not any(_c.state != ChanState.EMPTY for _c in self.channels):
-                        self._phase = "idle"
-                continue
-
             N = c.beats
 
             if c.state == ChanState.PRIMED:
