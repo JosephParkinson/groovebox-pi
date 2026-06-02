@@ -43,6 +43,7 @@ class ChanState:
     RECORDING   = "recording"
     PLAYING     = "playing"
     OVERDUBBING = "overdubbing"
+    READY       = "ready"     # one-shot rec: recorded + quantised, waiting to be triggered
 
 
 class LoopEvent:
@@ -57,12 +58,13 @@ class LoopChannel:
     VALID_BARS = (1, 2, 4, 8)
 
     def __init__(self):
-        self.state:        str  = ChanState.EMPTY
-        self.bars:         int  = 4
-        self.events:       list = []
-        self._fired:       set  = set()
-        self.muted:        bool = False
-        self.overdub_mode: bool = False
+        self.state:           str  = ChanState.EMPTY
+        self.bars:            int  = 4
+        self.events:          list = []
+        self._fired:          set  = set()
+        self.muted:           bool = False
+        self.rec_mode:        str  = "loop"    # "loop" | "overdub" | "one_shot"
+        self._one_shot_firing: bool = False    # True while playing a triggered one-shot
         # Sequence track fields (populated by LoopEngine.load_seq_track)
         self.is_seq_track: bool        = False
         self.seq_name:     str         = ""
@@ -78,11 +80,12 @@ class LoopChannel:
         self.events       = []
         self._fired       = set()
         self.muted        = False
-        self.is_seq_track = False
-        self.seq_name     = ""
-        self.seq_one_shot = False
-        self.seq_grid     = None
-        # overdub_mode preserved — it's a per-channel preference, not state
+        self._one_shot_firing = False
+        self.is_seq_track     = False
+        self.seq_name         = ""
+        self.seq_one_shot     = False
+        self.seq_grid         = None
+        # rec_mode preserved — it's a per-channel preference, not transient state
 
 
 class LoopEngine:
@@ -136,11 +139,17 @@ class LoopEngine:
                     c.state  = ChanState.PLAYING
                 else:
                     c.state = ChanState.PRIMED
-            elif c.state == ChanState.PLAYING and c.overdub_mode and not c.is_seq_track:
+            elif c.state == ChanState.READY:
+                # One-shot rec: trigger playback, bar-locked (same as fill behaviour)
+                bar_pos = (time.monotonic() - self._t0) / self.beat_dur % c.beats
+                c._fired = {j for j, ev in enumerate(c.events) if ev.beat < bar_pos}
+                c.state  = ChanState.PLAYING
+                c._one_shot_firing = True
+            elif c.state == ChanState.PLAYING and c.rec_mode == "overdub" and not c.is_seq_track:
                 c.state = ChanState.OVERDUBBING
 
     def _stop_all_overdubs(self) -> None:
-        """Transition ALL OVERDUBBING channels to PLAYING. Must be called under _lock."""
+        """Quantise and stop all OVERDUBBING channels → PLAYING. Must be called under _lock."""
         grid = self.settings.quantize_beats
         for c in self.channels:
             if c.state == ChanState.OVERDUBBING:
@@ -196,11 +205,11 @@ class LoopEngine:
         with self._lock:
             self.channels[ch].muted = not self.channels[ch].muted
 
-    def toggle_overdub_mode(self, ch: int) -> None:
+    def cycle_rec_mode(self, ch: int) -> None:
+        """Cycle loop → overdub → one_shot (or toggle seq_one_shot for seq tracks)."""
         with self._lock:
             c = self.channels[ch]
             if c.is_seq_track:
-                # 'o' on a seq track toggles one_shot / loop mode
                 c.seq_one_shot = not c.seq_one_shot
                 if c.seq_one_shot:
                     c.bars = 1
@@ -213,7 +222,8 @@ class LoopEngine:
                         c.events = _seq_to_events(c.seq_grid, 4)
                         c._fired = set()
             else:
-                c.overdub_mode = not c.overdub_mode
+                modes = ("loop", "overdub", "one_shot")
+                c.rec_mode = modes[(modes.index(c.rec_mode) + 1) % len(modes)]
 
     def set_bars(self, ch: int, direction: int) -> None:
         with self._lock:
@@ -270,7 +280,8 @@ class LoopEngine:
         if self._phase != "running":
             return None
         active = [c.beats for c in self.channels
-                  if c.state in (ChanState.RECORDING, ChanState.PLAYING, ChanState.OVERDUBBING)]
+                  if c.state in (ChanState.RECORDING, ChanState.PLAYING,
+                                 ChanState.OVERDUBBING, ChanState.READY)]
         max_beats = max(active) if active else 16
         global_beat = (time.monotonic() - self._t0) / self.beat_dur
         return (global_beat % max_beats) / max_beats
@@ -420,15 +431,17 @@ class LoopEngine:
                             c._fired.add(j)
                             if not c.muted:
                                 result.append(ev.pad)
-                # Transition RECORDING → PLAYING (or OVERDUBBING if mode is on)
+                # Transition RECORDING → next state based on rec_mode
                 if c.state == ChanState.RECORDING:
                     grid = self.settings.quantize_beats
                     for ev in c.events:
                         ev.beat = round(ev.beat / grid) * grid % c.beats
                     c.events.sort(key=lambda e: e.beat)
-                    if c.overdub_mode:
+                    if c.rec_mode == "overdub":
                         self._stop_all_overdubs()
                         c.state = ChanState.OVERDUBBING
+                    elif c.rec_mode == "one_shot":
+                        c.state = ChanState.READY   # wait for manual trigger
                     else:
                         c.state = ChanState.PLAYING
                 elif c.state == ChanState.OVERDUBBING:
@@ -437,6 +450,10 @@ class LoopEngine:
                     for ev in c.events:
                         ev.beat = round(ev.beat / grid) * grid % c.beats
                     c.events.sort(key=lambda e: e.beat)
+                # One-shot rec track: return to READY after one triggered play
+                if c._one_shot_firing and c.state == ChanState.PLAYING:
+                    c._one_shot_firing = False
+                    c.state = ChanState.READY
                 # One-shot seq track: stop after one cycle
                 if c.is_seq_track and c.seq_one_shot and c.state == ChanState.PLAYING:
                     c.state = ChanState.EMPTY

@@ -130,7 +130,7 @@ This gives full navigation of all menus. Play-screen controls (arming loops, BPM
 | `1` – `4`             | Arm / prime a loop channel                          |
 | Hold `1`–`4` (0.7 s)  | Delete that channel                                 |
 | `x`                   | Mute / unmute selected channel                      |
-| `o`                   | Toggle overdub (normal) / one-shot mode (seq track) |
+| `o`                   | Cycle channel mode: Loop → Overdub → One-shot       |
 | `l`                   | Load sequence into selected channel (when empty)    |
 | ↑ / ↓                 | Select channel                                      |
 | ← / →                 | Change loop length (bars)                           |
@@ -139,6 +139,14 @@ This gives full navigation of all menus. Play-screen controls (arming loops, BPM
 | `r`                   | Reset all channels                                  |
 | `Q W E R` / `A S D F` | Trigger pads 1–8                                   |
 | Backspace             | Back                                                |
+
+**Channel modes** (`o` to cycle):
+
+| Indicator | Mode      | Behaviour                                                           |
+| --------- | --------- | ------------------------------------------------------------------- |
+| *(none)*  | Loop      | Records once, then loops continuously (default)                     |
+| `O`       | Overdub   | Loops, then automatically enters overdub on the next cycle          |
+| `1x`      | One-shot  | Records once, quantises, then sits purple (READY). Press 1–4 again to trigger — plays once and returns to READY |
 
 **Sequence tracks** — press `l` on an empty channel to load a saved sequence instead of recording.  
 The sequence plays synced to the loop at the current BPM. Two modes, toggled with `o`:

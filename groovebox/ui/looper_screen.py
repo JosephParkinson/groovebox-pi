@@ -18,6 +18,7 @@ _MUTED_BDR  = (110, 110, 110)
 
 # (fill_color, border_color) per state
 # fill=None means the bar is drawn specially (empty or progressive)
+_PURPLE = (90, 30, 120)
 _STYLE = {
     ChanState.EMPTY:       (None,      (38, 38, 38)),
     ChanState.PRIMED:      ((50, 40, 0), AMBER),
@@ -25,6 +26,7 @@ _STYLE = {
     ChanState.RECORDING:   (RED,       RED),          # progressive red fill
     ChanState.PLAYING:     (GREEN,     GREEN),
     ChanState.OVERDUBBING: (HIGHLIGHT, HIGHLIGHT),
+    ChanState.READY:       (_PURPLE,   (150, 60, 190)),  # recorded, waiting to trigger
 }
 
 # Global position strip (thin bar above the channel bars)
@@ -169,6 +171,10 @@ class LooperScreen(Screen):
                 cx = _BX0 + int(pos * bw)
                 draw.line([(cx, y0 + 4), (cx, y1 - 4)], fill=WHITE, width=2)
 
+        elif state == ChanState.READY:
+            draw.rectangle([_BX0, y0, _BX1, y1], fill=fill_col)
+            self._draw_hit_markers(draw, ch)   # show what's loaded
+
         # ── Redraw border on top of fill so it's always crisp ─────────────────
         draw.rectangle([_BX0, y0, _BX1, y1], outline=border_col)
 
@@ -195,15 +201,18 @@ class LooperScreen(Screen):
             if ch.seq_name:
                 name_col = WHITE if state == ChanState.PLAYING else FG_DIM
                 draw.text((_BX0 + 5, y0 + 4), ch.seq_name[:13], fill=name_col, font=small)
-        elif ch.overdub_mode:
+        elif ch.rec_mode == "overdub":
             od_col = WHITE if state == ChanState.OVERDUBBING else (80, 110, 200)
             draw.text((_BX1 - 13, y0 + 4), "O", fill=od_col, font=small)
+        elif ch.rec_mode == "one_shot":
+            os_col = WHITE if state in (ChanState.PLAYING, ChanState.READY) else (150, 80, 190)
+            draw.text((_BX1 - 18, y0 + 4), "1x", fill=os_col, font=small)
 
         # ── Loop length (bottom-right, inside bar) ────────────────────────────
         bars_txt = f"{ch.bars}b"
         tb = draw.textbbox((0, 0), bars_txt, font=small)
         tw = tb[2] - tb[0]
-        txt_col = WHITE if state != ChanState.EMPTY else FG_DIM
+        txt_col = WHITE if state not in (ChanState.EMPTY,) else FG_DIM
         draw.text((_BX1 - tw - 6, y1 - 14), bars_txt, fill=txt_col, font=small)
 
     # ── Input ─────────────────────────────────────────────────────────────────
@@ -226,7 +235,7 @@ class LooperScreen(Screen):
         elif key == "x":
             self.engine.toggle_mute(self.cursor)
         elif key == "o":
-            self.engine.toggle_overdub_mode(self.cursor)   # overdub OR seq one_shot toggle
+            self.engine.cycle_rec_mode(self.cursor)   # loop → overdub → one_shot (→ loop)
         elif key == "l":
             c = self.engine.channels[self.cursor]
             if c.state == ChanState.EMPTY:
