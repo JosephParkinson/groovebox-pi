@@ -37,6 +37,7 @@ from groovebox.looper import LoopEngine
 from groovebox.sequencer import Sequencer
 from groovebox.settings import Settings
 from groovebox.ui.base import Screen, find_font, pil_to_tk
+from groovebox.midi_controller import MidiController
 from groovebox.ui.main_menu import MainMenu
 
 # ImageTk gives ~3–5× faster tkinter updates than the PPM fallback.
@@ -134,6 +135,18 @@ class Groovebox:
 
         _start_audio(self.kit)
         init_buttons(self._gpio_key)
+
+        # MIDI controller — thread-safe callback marshals to the tkinter thread
+        def midi_cb(k):
+            self.root.after(0, lambda _k=k: self._dispatch(_k))
+
+        self._midi = MidiController(
+            engine       = self.engine,
+            seq          = self.seq,
+            stack_getter = lambda: self.stack,
+            key_callback = midi_cb,
+        )
+        self._midi.connect()   # no-op if no MIDI device is present
 
         root.bind("<Key>",        self._on_key)
         root.bind("<KeyRelease>", self._on_keyup)
@@ -237,6 +250,14 @@ def run_headless() -> None:
             _apply_result(stack, stack[-1].handle_key(keysym))
 
     init_buttons(on_gpio_key)
+
+    midi = MidiController(
+        engine       = engine,
+        seq          = seq,
+        stack_getter = lambda: stack,
+        key_callback = on_gpio_key,
+    )
+    midi.connect()
 
     frame_ms  = 66 if settings.low_latency else 40
     frame_sec = frame_ms / 1000.0

@@ -198,6 +198,7 @@ def configure_audio(low_latency: bool) -> None:
 class _StreamMixer:
     def __init__(self):
         self._sr      = MIXER_SAMPLERATE
+        self._volume: float = 1.0   # master volume (0.0–1.0)
         self._samples: dict[str, "np.ndarray"] = {}
         self._queue:   deque = deque()   # main thread → callback, lockless
         self._active:  list  = []        # owned exclusively by the callback
@@ -258,6 +259,8 @@ class _StreamMixer:
                 still_active.append(v)
         self._active = still_active
 
+        if self._volume != 1.0:
+            outdata *= self._volume
         # Clip only when multiple voices could sum above ±1.0
         if len(still_active) > 1:
             np.clip(outdata, -1.0, 1.0, out=outdata)
@@ -271,6 +274,12 @@ def _get_stream_mixer() -> _StreamMixer:
     if _stream_mixer is None:
         _stream_mixer = _StreamMixer()
     return _stream_mixer
+
+
+def set_master_volume(vol: float) -> None:
+    """Set master output volume (0.0 – 1.0). Thread-safe."""
+    if _stream_mixer is not None:
+        _stream_mixer._volume = max(0.0, min(1.0, float(vol)))
 
 
 # ── Public audio API ──────────────────────────────────────────────────────────
