@@ -26,9 +26,12 @@ class InstrumentsScreen(Screen):
             x0, y0, x1, y1 = pad_rect(i)
             selected = i == self.cursor
             filled   = self.kit.pads[i] is not None
+            is_seq   = isinstance(self.kit.pads[i], dict)
 
             if selected:
                 draw.rectangle([x0, y0, x1, y1], fill=HIGHLIGHT)
+            elif is_seq:
+                draw.rectangle([x0, y0, x1, y1], fill=(30, 40, 120))
             elif filled:
                 draw.rectangle([x0, y0, x1, y1], fill=GREEN)
             else:
@@ -41,10 +44,15 @@ class InstrumentsScreen(Screen):
         if self._saved_at and time.monotonic() - self._saved_at < 1.5:
             draw.text((centered_x(draw, "Saved!", small), 158), "Saved!", fill=GREEN, font=small)
         else:
-            sample    = self.kit.pads[self.cursor]
-            pad_label = Path(sample).stem[:20] if sample else "(empty)"
+            entry = self.kit.pads[self.cursor]
+            if isinstance(entry, dict):
+                pad_label = f"[SEQ] {Path(entry['seq_file']).stem[:14]}"
+            elif entry:
+                pad_label = Path(entry).stem[:20]
+            else:
+                pad_label = "(empty)"
             draw.text((8, 158), f"Pad {self.cursor + 1}: {pad_label}",
-                      fill=FG if sample else FG_DIM, font=small)
+                      fill=FG if entry else FG_DIM, font=small)
 
         if self.save_path:
             hint = "Enter=assign  s=save  Bksp=back"
@@ -74,56 +82,80 @@ class InstrumentsScreen(Screen):
 
 class PadAssignScreen(Screen):
     SAMPLES_DIR = Path("samples")
-    VISIBLE = 6
+    SEQS_DIR    = Path("sequences")
+    VISIBLE     = 5
 
     def __init__(self, kit: Kit, pad_index: int):
-        self.kit       = kit
-        self.pad_index = pad_index
-        self.files     = sorted(self.SAMPLES_DIR.glob("*.wav")) if self.SAMPLES_DIR.exists() else []
-        self.cursor    = 0
-        self.scroll    = 0
+        self.kit        = kit
+        self.pad_index  = pad_index
+        self._mode      = "sample"   # "sample" | "sequence"
+        self._samples   = sorted(self.SAMPLES_DIR.glob("*.wav")) if self.SAMPLES_DIR.exists() else []
+        self._seqs      = sorted(self.SEQS_DIR.glob("*.json"))   if self.SEQS_DIR.exists()    else []
+        self.cursor     = 0
+        self.scroll     = 0
+
+    def _files(self):
+        return self._samples if self._mode == "sample" else self._seqs
 
     def draw(self, draw, font, small):
         title = f"ASSIGN PAD {self.pad_index + 1}"
-        draw.text((centered_x(draw, title, font), 8), title, fill=FG, font=font)
+        draw.text((centered_x(draw, title, font), 5), title, fill=FG, font=font)
 
-        if not self.files:
-            draw.text((8,  60), "No .wav files found.", fill=FG_DIM, font=small)
-            draw.text((8,  78), "Drop samples into:",   fill=FG_DIM, font=small)
-            draw.text((8,  96), "  samples/",           fill=FG,     font=small)
+        # Mode tabs
+        s_col = WHITE   if self._mode == "sample"   else FG_DIM
+        q_col = WHITE   if self._mode == "sequence" else FG_DIM
+        s_lbl = "[SAMPLES]"
+        q_lbl = "[SEQUENCES]"
+        draw.text((8,     26), s_lbl, fill=s_col, font=small)
+        draw.text((WIDTH - draw.textbbox((0,0), q_lbl, font=small)[2] - 8, 26),
+                  q_lbl, fill=q_col, font=small)
+
+        files = self._files()
+        if not files:
+            empty_msg = "No .wav files in samples/" if self._mode == "sample" else "No sequences found"
+            draw.text((8, 60), empty_msg, fill=FG_DIM, font=small)
         else:
-            y = 38
-            for i in range(self.scroll, min(self.scroll + self.VISIBLE, len(self.files))):
-                label = self.files[i].stem[:26]
+            y = 46
+            for i in range(self.scroll, min(self.scroll + self.VISIBLE, len(files))):
+                label = files[i].stem[:26]
                 if i == self.cursor:
-                    bbox = draw.textbbox((0, 0), label, font=small)
-                    h = bbox[3] - bbox[1]
+                    bb = draw.textbbox((0, 0), label, font=small)
+                    h  = bb[3] - bb[1]
                     draw.rectangle([5, y - 2, WIDTH - 5, y + h + 2], fill=HIGHLIGHT)
-                    draw.text((10, y), label, fill=WHITE,   font=small)
+                    draw.text((10, y), label, fill=WHITE,  font=small)
                 else:
                     draw.text((10, y), label, fill=FG_DIM, font=small)
-                y += 26
+                y += 24
 
-        hint = "Enter=select   Bksp=cancel"
-        draw.text((centered_x(draw, hint, small), HEIGHT - 22), hint, fill=(75, 75, 75), font=small)
+        hint = "Tab=toggle  Enter=assign  Bksp=cancel"
+        draw.text((centered_x(draw, hint, small), HEIGHT - 16),
+                  hint, fill=(75, 75, 75), font=small)
 
     def handle_key(self, key):
+        files = self._files()
         if key == "BackSpace":
             return "back"
-        elif key == "Up" and self.files:
+        elif key == "Tab":
+            self._mode  = "sequence" if self._mode == "sample" else "sample"
+            self.cursor = 0
+            self.scroll = 0
+        elif key == "Up" and files:
             self.cursor = max(0, self.cursor - 1)
             if self.cursor < self.scroll:
                 self.scroll = self.cursor
-        elif key == "Down" and self.files:
-            self.cursor = min(len(self.files) - 1, self.cursor + 1)
+        elif key == "Down" and files:
+            self.cursor = min(len(files) - 1, self.cursor + 1)
             if self.cursor >= self.scroll + self.VISIBLE:
                 self.scroll = self.cursor - self.VISIBLE + 1
-        elif key == "Return" and self.files:
-            path = str(self.files[self.cursor])
-            self.kit.pads[self.pad_index] = path
-            if _WSL and shutil.which("powershell.exe"):
-                _get_win_audio().preload(self.pad_index, path)
+        elif key == "Return" and files:
+            path = str(files[self.cursor])
+            if self._mode == "sample":
+                self.kit.pads[self.pad_index] = path
+                if _WSL and shutil.which("powershell.exe"):
+                    _get_win_audio().preload(self.pad_index, path)
+                else:
+                    threading.Thread(target=preload_wav, args=(path,), daemon=True).start()
             else:
-                threading.Thread(target=preload_wav, args=(path,), daemon=True).start()
+                self.kit.pads[self.pad_index] = {"seq_file": path}
             return "back"
         return None

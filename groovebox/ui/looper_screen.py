@@ -143,6 +143,10 @@ class LooperScreen(Screen):
         if ch.muted:
             draw.rectangle([_BX0, y0, _BX1, y1], fill=fill_col)
 
+        elif state == ChanState.EMPTY and ch.is_seq_track:
+            # Subtle blue tint — shows a sequence is loaded and ready
+            draw.rectangle([_BX0, y0, _BX1, y1], fill=(10, 12, 38))
+
         elif state == ChanState.PRIMED:
             draw.rectangle([_BX0, y0, _BX1, y1], fill=fill_col)
 
@@ -177,8 +181,21 @@ class LooperScreen(Screen):
             fw = int(held * bw)
             draw.rectangle([_BX0, y1 - 3, _BX0 + fw, y1], fill=RED)
 
-        # ── Overdub mode indicator (top-right, inside bar) ────────────────────
-        if ch.overdub_mode:
+        # ── Top-right indicator: seq mode or overdub ─────────────────────────
+        if ch.is_seq_track:
+            mode_txt = "1x" if ch.seq_one_shot else "L"
+            if state == ChanState.PLAYING:
+                mode_col = WHITE
+            elif ch.seq_one_shot:
+                mode_col = AMBER
+            else:
+                mode_col = (80, 110, 200)
+            draw.text((_BX1 - 18, y0 + 4), mode_txt, fill=mode_col, font=small)
+            # Seq name overlaid (left side)
+            if ch.seq_name:
+                name_col = WHITE if state == ChanState.PLAYING else FG_DIM
+                draw.text((_BX0 + 5, y0 + 4), ch.seq_name[:13], fill=name_col, font=small)
+        elif ch.overdub_mode:
             od_col = WHITE if state == ChanState.OVERDUBBING else (80, 110, 200)
             draw.text((_BX1 - 13, y0 + 4), "O", fill=od_col, font=small)
 
@@ -209,7 +226,12 @@ class LooperScreen(Screen):
         elif key == "x":
             self.engine.toggle_mute(self.cursor)
         elif key == "o":
-            self.engine.toggle_overdub_mode(self.cursor)
+            self.engine.toggle_overdub_mode(self.cursor)   # overdub OR seq one_shot toggle
+        elif key == "l":
+            c = self.engine.channels[self.cursor]
+            if c.state == ChanState.EMPTY:
+                from .seq_picker_screen import SeqPickerScreen
+                return SeqPickerScreen(self.engine, self.cursor)
         elif key in ("minus", "-"):
             self.engine.bpm = max(40.0, self.engine.bpm - 1)
         elif key in ("equal", "="):

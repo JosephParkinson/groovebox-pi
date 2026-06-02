@@ -125,19 +125,31 @@ This gives full navigation of all menus. Play-screen controls (arming loops, BPM
 
 ### Play (loop recorder)
 
-| Key                   | Action                                  |
-| --------------------- | --------------------------------------- |
-| `1` – `4`             | Arm / prime a loop channel              |
-| Hold `1`–`4` (0.7 s)  | Delete that channel                     |
-| `x`                   | Mute / unmute selected channel          |
-| `o`                   | Toggle overdub mode on selected channel |
-| ↑ / ↓                 | Select channel                          |
-| ← / →                 | Change loop length (bars)               |
-| `-` / `=`             | BPM −1 / +1                             |
-| `m`                   | Toggle metronome                        |
-| `r`                   | Reset all channels                      |
-| `Q W E R` / `A S D F` | Trigger pads 1–8                        |
-| Backspace             | Back                                    |
+| Key                   | Action                                              |
+| --------------------- | --------------------------------------------------- |
+| `1` – `4`             | Arm / prime a loop channel                          |
+| Hold `1`–`4` (0.7 s)  | Delete that channel                                 |
+| `x`                   | Mute / unmute selected channel                      |
+| `o`                   | Toggle overdub (normal) / one-shot mode (seq track) |
+| `l`                   | Load sequence into selected channel (when empty)    |
+| ↑ / ↓                 | Select channel                                      |
+| ← / →                 | Change loop length (bars)                           |
+| `-` / `=`             | BPM −1 / +1                                         |
+| `m`                   | Toggle metronome                                    |
+| `r`                   | Reset all channels                                  |
+| `Q W E R` / `A S D F` | Trigger pads 1–8                                   |
+| Backspace             | Back                                                |
+
+**Sequence tracks** — press `l` on an empty channel to load a saved sequence instead of recording.  
+The sequence plays synced to the loop at the current BPM. Two modes, toggled with `o`:
+
+| Indicator | Mode      | Behaviour                          |
+| --------- | --------- | ---------------------------------- |
+| `L`       | Loop      | Sequence repeats every cycle       |
+| `1x`      | One shot  | Plays once then the slot clears    |
+
+**Sequence pads** — in Kits → Edit Pads, press Tab to switch to sequence assignment.  
+A pad assigned to a sequence plays it as a one-shot trigger (like a sound effect) instead of an audio sample.  Blue pad colour in the instruments grid indicates a sequence pad.
 
 ### Sequencer
 
@@ -357,8 +369,9 @@ groovebox-pi/
         ├── debug_screen.py  Debug / diagnostics screen
         ├── instruments.py   Pad assignment screen
         ├── kits.py          Kit management screens
-        ├── looper_screen.py Play (loop recorder) screen
-        ├── main_menu.py     Home menu
-        ├── sequencer_screen.py Sequencer + save/load screens
-        └── settings_screen.py  Settings + Debug entry
+        ├── looper_screen.py     Play (loop recorder) screen
+        ├── main_menu.py         Home menu
+        ├── seq_picker_screen.py Sequence-into-loop-track picker
+        ├── sequencer_screen.py  Sequencer + save/load screens
+        └── settings_screen.py   Settings + Debug entry
 ```

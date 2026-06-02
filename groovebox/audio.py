@@ -309,7 +309,7 @@ def play_wav(path: str) -> None:
 def _trigger_pad(pad: int, kit) -> None:
     """Non-blocking single-pad trigger — safe to call from the UI thread."""
     path = kit.pads[pad]
-    if not path:
+    if not path or isinstance(path, dict):   # dict = seq pad, no audio here
         return
     if _WSL and shutil.which("powershell.exe"):
         threading.Thread(target=lambda: _get_win_audio().play_pad(pad), daemon=True).start()
@@ -328,13 +328,13 @@ def _trigger_pads_batch(pads: list[int], kit) -> None:
     if _WSL and _PS_AVAILABLE:
         server = _get_win_audio()
         for pad in pads:
-            if kit.pads[pad]:
+            if kit.pads[pad] and not isinstance(kit.pads[pad], dict):
                 server.play_pad(pad)
     else:
         mixer = _get_stream_mixer() if _AUDIO else None
         for pad in pads:
             path = kit.pads[pad]
-            if not path:
+            if not path or isinstance(path, dict):
                 continue
             if mixer:
                 mixer.play(path)

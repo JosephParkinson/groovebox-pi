@@ -16,10 +16,20 @@ def _kit_to_dict(kit: Kit) -> dict:
     return {"name": kit.name, "pads": kit.pads}
 
 
+def _pad_entry(raw):
+    """Validate and normalise a single pad entry from saved JSON."""
+    if raw is None:
+        return None
+    if isinstance(raw, dict):
+        sf = raw.get("seq_file")
+        return raw if sf and Path(sf).exists() else None
+    return raw if raw and Path(raw).exists() else None
+
+
 def _dict_to_kit(kit: Kit, data: dict) -> None:
     kit.name = data.get("name", "")
-    pads = data.get("pads", [])
-    kit.pads = [(p if p and Path(p).exists() else None) for p in pads]
+    pads     = data.get("pads", [])
+    kit.pads = [_pad_entry(p) for p in pads[:PAD_COUNT]]
     while len(kit.pads) < PAD_COUNT:
         kit.pads.append(None)
 

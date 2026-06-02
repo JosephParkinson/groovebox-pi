@@ -1,3 +1,4 @@
+import json
 import shutil
 import threading
 import time
@@ -6,6 +7,33 @@ from pathlib import Path
 from .audio import _WSL, _get_win_audio, _trigger_pad, _trigger_pads_batch, play_wav
 from .kit import Kit
 from .settings import Settings
+
+
+def _load_seq_grid(path: str) -> tuple[list, str]:
+    """Return (grid[8][16], name) from a sequence JSON file."""
+    data = json.loads(Path(path).read_text())
+    name = data.get("name", Path(path).stem)
+    raw  = data.get("grid", [])
+    grid: list[list[bool]] = []
+    for row in raw[:8]:
+        grid.append([bool(v) for v in row[:16]] + [False] * max(0, 16 - len(row)))
+    while len(grid) < 8:
+        grid.append([False] * 16)
+    return grid, name
+
+
+def _seq_to_events(grid: list, bars: int) -> list:
+    """Convert grid[pad][step] to LoopEvent list, repeated across `bars` bars."""
+    STEP_BEATS = 4.0 / 16  # 0.25 — sixteenth note
+    events = []
+    for bar in range(bars):
+        offset = bar * 4.0
+        for pad_idx, row in enumerate(grid):
+            for step_idx, active in enumerate(row):
+                if active:
+                    events.append(LoopEvent(offset + step_idx * STEP_BEATS, pad_idx))
+    events.sort(key=lambda e: e.beat)
+    return events
 
 
 class ChanState:
@@ -35,16 +63,25 @@ class LoopChannel:
         self._fired:       set  = set()
         self.muted:        bool = False
         self.overdub_mode: bool = False
+        # Sequence track fields (populated by LoopEngine.load_seq_track)
+        self.is_seq_track: bool       = False
+        self.seq_name:     str        = ""
+        self.seq_one_shot: bool       = False   # True → play once then go EMPTY
+        self.seq_grid:     list | None = None   # raw grid for bar-count re-gen
 
     @property
     def beats(self) -> int:
         return self.bars * 4
 
     def reset(self) -> None:
-        self.state  = ChanState.EMPTY
-        self.events = []
-        self._fired = set()
-        self.muted  = False
+        self.state        = ChanState.EMPTY
+        self.events       = []
+        self._fired       = set()
+        self.muted        = False
+        self.is_seq_track = False
+        self.seq_name     = ""
+        self.seq_one_shot = False
+        self.seq_grid     = None
         # overdub_mode preserved — it's a per-channel preference, not state
 
 
@@ -92,7 +129,7 @@ class LoopEngine:
                     self._ci_beat  = -1
                 else:
                     c.state = ChanState.PRIMED
-            elif c.state == ChanState.PLAYING and c.overdub_mode:
+            elif c.state == ChanState.PLAYING and c.overdub_mode and not c.is_seq_track:
                 c.state = ChanState.OVERDUBBING
 
     def _stop_all_overdubs(self) -> None:
@@ -107,6 +144,14 @@ class LoopEngine:
 
     def note(self, pad: int) -> None:
         """Play a pad hit and record it to all active recording/overdubbing channels."""
+        pad_entry = self.kit.pads[pad] if pad < len(self.kit.pads) else None
+        if isinstance(pad_entry, dict) and "seq_file" in pad_entry:
+            threading.Thread(
+                target=self._play_seq_oneshot,
+                args=(pad_entry["seq_file"],),
+                daemon=True,
+            ).start()
+            return
         _trigger_pad(pad, self.kit)
         with self._lock:
             if self._phase == "count_in":
@@ -146,15 +191,73 @@ class LoopEngine:
 
     def toggle_overdub_mode(self, ch: int) -> None:
         with self._lock:
-            self.channels[ch].overdub_mode = not self.channels[ch].overdub_mode
+            c = self.channels[ch]
+            if c.is_seq_track:
+                # 'o' on a seq track toggles one_shot / loop mode
+                c.seq_one_shot = not c.seq_one_shot
+                if c.seq_one_shot:
+                    c.bars = 1
+                    if c.seq_grid:
+                        c.events = _seq_to_events(c.seq_grid, 1)
+                        c._fired = set()
+                else:
+                    c.bars = 4
+                    if c.seq_grid:
+                        c.events = _seq_to_events(c.seq_grid, 4)
+                        c._fired = set()
+            else:
+                c.overdub_mode = not c.overdub_mode
 
     def set_bars(self, ch: int, direction: int) -> None:
         with self._lock:
             c = self.channels[ch]
             if c.state == ChanState.EMPTY:
+                if c.is_seq_track and c.seq_one_shot:
+                    return  # one-shot seq tracks are always 1 bar
                 vals = LoopChannel.VALID_BARS
-                idx = vals.index(c.bars) if c.bars in vals else 0
+                idx  = vals.index(c.bars) if c.bars in vals else 0
                 c.bars = vals[(idx + direction) % len(vals)]
+                # Loop-mode seq track: regenerate events for new bar count
+                if c.is_seq_track and c.seq_grid:
+                    c.events = _seq_to_events(c.seq_grid, c.bars)
+                    c._fired = set()
+
+    def load_seq_track(self, ch: int, path: str, one_shot: bool = False) -> None:
+        """Load a sequence JSON into channel ch. Channel goes EMPTY — arm with 1-4 to play."""
+        grid, name = _load_seq_grid(path)
+        with self._lock:
+            c = self.channels[ch]
+            c.reset()
+            c.is_seq_track = True
+            c.seq_name     = name
+            c.seq_one_shot = one_shot
+            c.seq_grid     = grid
+            c.bars         = 1 if one_shot else c.bars
+            c.events       = _seq_to_events(grid, c.bars)
+            if not any(_c.state != ChanState.EMPTY for _c in self.channels):
+                self._phase = "idle"
+
+    def clear_seq_track(self, ch: int) -> None:
+        """Remove the sequence from channel ch, reverting it to a normal record channel."""
+        with self._lock:
+            self.channels[ch].reset()
+            if not any(_c.state != ChanState.EMPTY for _c in self.channels):
+                self._phase = "idle"
+
+    def _play_seq_oneshot(self, seq_file: str) -> None:
+        """Background thread: play a sequence file once at current BPM, used for seq pads."""
+        try:
+            grid, _ = _load_seq_grid(seq_file)
+            events  = _seq_to_events(grid, bars=1)
+            t0      = time.monotonic()
+            for ev in events:
+                target = t0 + ev.beat * self.beat_dur
+                gap    = target - time.monotonic()
+                if gap > 0:
+                    time.sleep(gap)
+                _trigger_pads_batch([ev.pad], self.kit)
+        except Exception:
+            pass
 
     def loop_pos(self) -> float | None:
         if self._phase != "running":
@@ -260,9 +363,13 @@ class LoopEngine:
             self._preroll.clear()
             for c in self.channels:
                 if c.state in (ChanState.COUNTING, ChanState.PRIMED):
-                    c.state  = ChanState.RECORDING
-                    c.events = list(seed)   # beat-0 pre-roll events
-                    c._fired = set()
+                    if c.is_seq_track:
+                        c.state  = ChanState.PLAYING   # events pre-loaded, no recording
+                        c._fired = set()
+                    else:
+                        c.state  = ChanState.RECORDING
+                        c.events = list(seed)
+                        c._fired = set()
         return result
 
     def _tick_running(self, now: float, last: float) -> list:
@@ -276,14 +383,18 @@ class LoopEngine:
         if self.metronome and int(new_global) > int(old_global):
             result.append("hat")
 
-        for i, c in enumerate(self.channels):
+        for c in self.channels:
             N = c.beats
 
             if c.state == ChanState.PRIMED:
                 if int(new_global / N) > int(old_global / N):
-                    c.state  = ChanState.RECORDING
-                    c.events = []
-                    c._fired = set()
+                    if c.is_seq_track:
+                        c.state  = ChanState.PLAYING   # events pre-loaded
+                        c._fired = set()
+                    else:
+                        c.state  = ChanState.RECORDING
+                        c.events = []
+                        c._fired = set()
                 continue
 
             if c.state not in (ChanState.RECORDING, ChanState.PLAYING, ChanState.OVERDUBBING):
@@ -295,11 +406,11 @@ class LoopEngine:
             new_pos   = new_global % N
 
             if wrapped:
-                # Drain unfired tail events from the previous cycle
+                # Drain unfired tail events from the end of the previous cycle
                 if c.state in (ChanState.PLAYING, ChanState.OVERDUBBING):
-                    for i, ev in enumerate(c.events):
-                        if i not in c._fired:
-                            c._fired.add(i)
+                    for j, ev in enumerate(c.events):
+                        if j not in c._fired:
+                            c._fired.add(j)
                             if not c.muted:
                                 result.append(ev.pad)
                 # Transition RECORDING → PLAYING (or OVERDUBBING if mode is on)
@@ -313,13 +424,18 @@ class LoopEngine:
                         c.state = ChanState.OVERDUBBING
                     else:
                         c.state = ChanState.PLAYING
+                # One-shot seq track: stop after one cycle
+                if c.is_seq_track and c.seq_one_shot and c.state == ChanState.PLAYING:
+                    c.state = ChanState.EMPTY
+                    if not any(_c.state != ChanState.EMPTY for _c in self.channels):
+                        self._phase = "idle"
                 # OVERDUBBING stays as OVERDUBBING across loop boundaries
                 c._fired = set()
 
             if c.state in (ChanState.PLAYING, ChanState.OVERDUBBING):
-                for i, ev in enumerate(c.events):
-                    if i not in c._fired and ev.beat <= new_pos:
-                        c._fired.add(i)
+                for j, ev in enumerate(c.events):
+                    if j not in c._fired and ev.beat <= new_pos:
+                        c._fired.add(j)
                         if not c.muted:
                             result.append(ev.pad)
 
