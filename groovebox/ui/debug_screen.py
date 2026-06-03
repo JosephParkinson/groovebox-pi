@@ -180,11 +180,13 @@ class DebugScreen(Screen):
         try:
             import numpy as np
             import sounddevice as sd
-            sr   = 44100
-            dur  = 0.5
-            t    = np.linspace(0, dur, int(sr * dur), endpoint=False)
-            tone = (np.sin(2 * np.pi * 440 * t) * 0.4).astype(np.float32)
-            sd.play(np.stack([tone, tone], axis=1), sr)
+            from ..audio import _find_output_device
+            sr     = 44100
+            dur    = 0.5
+            t      = np.linspace(0, dur, int(sr * dur), endpoint=False)
+            tone   = (np.sin(2 * np.pi * 440 * t) * 0.4).astype(np.float32)
+            device = _find_output_device()
+            sd.play(np.stack([tone, tone], axis=1), sr, device=device)
             sd.wait()
             self._tone_status = "OK"
         except Exception as exc:

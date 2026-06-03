@@ -181,6 +181,24 @@ MIXER_SAMPLERATE: int = 44100
 MIXER_BLOCKSIZE:  int = 512
 
 
+_PREFERRED_DEVICE_KEYWORDS = ["komplete", "k1"]   # searched in order, case-insensitive
+
+
+def _find_output_device() -> int | None:
+    """Return the index of the preferred USB audio output, or None to use the system default."""
+    try:
+        import sounddevice as sd
+        devices = sd.query_devices()
+        for kw in _PREFERRED_DEVICE_KEYWORDS:
+            for i, d in enumerate(devices):
+                if kw in d["name"].lower() and d["max_output_channels"] > 0:
+                    print(f"[audio] using device {i}: {d['name']}")
+                    return i
+    except Exception:
+        pass
+    return None
+
+
 def configure_audio(low_latency: bool) -> None:
     """
     Set sample-rate / block-size before the stream is created.
@@ -209,6 +227,7 @@ class _StreamMixer:
         self._queue:   deque = deque()   # main thread → callback, lockless
         self._active:  list  = []        # owned exclusively by the callback
         self._stream = sd.OutputStream(
+            device=_find_output_device(),
             samplerate=self._sr,
             channels=2,
             dtype="float32",
