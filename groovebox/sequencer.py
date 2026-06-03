@@ -15,7 +15,7 @@ class Sequencer:
 
     def __init__(self, kit: Kit):
         self.kit               = kit
-        self.bpm               = 120.0
+        self._bpm              = 120.0
         self.swing             = 0.0
         self.bars              = 1    # 1-16 bars
         self.name              = "untitled"
@@ -25,12 +25,22 @@ class Sequencer:
         self._running          = False
         self._t_next           = 0.0
         self._lock             = threading.Lock()
+        self._wake             = threading.Event()  # set on start/stop/BPM change
         self.on_cycle_end      = None   # Callable[[], None] | None — fires when step wraps to 0
         threading.Thread(target=self._run, daemon=True).start()
 
     @property
+    def bpm(self) -> float:
+        return self._bpm
+
+    @bpm.setter
+    def bpm(self, value: float) -> None:
+        self._bpm = float(value)
+        self._wake.set()   # recalculate precise sleep in _run()
+
+    @property
     def step_dur(self) -> float:
-        return 60.0 / self.bpm / 4   # 16th-note duration
+        return 60.0 / self._bpm / 4   # 16th-note duration
 
     @property
     def total_steps(self) -> int:
@@ -61,6 +71,7 @@ class Sequencer:
                 self._running = True
                 self._step   = 0
                 self._t_next = time.monotonic()
+        self._wake.set()
 
     def restart(self) -> None:
         """Force-restart from step 0 even if already running (song transitions)."""
@@ -68,10 +79,12 @@ class Sequencer:
             self._running = True
             self._step   = 0
             self._t_next = time.monotonic()
+        self._wake.set()
 
     def stop(self) -> None:
         with self._lock:
             self._running = False
+        self._wake.set()
 
     def is_running(self) -> bool:
         return self._running
@@ -85,12 +98,32 @@ class Sequencer:
             os.nice(-10)
         except (PermissionError, OSError, AttributeError):
             pass
+
         while True:
-            time.sleep(0.002)
+            # Snapshot the next scheduled time without holding the lock during sleep
+            with self._lock:
+                t_next = self._t_next if self._running else None
+
+            if t_next is None:
+                # Stopped — park until start()/restart() wakes us
+                self._wake.wait(timeout=0.050)
+                self._wake.clear()
+                continue
+
+            # Sleep precisely until the next step is due.
+            # Event.wait(timeout) replaces the old 2 ms fixed poll, eliminating
+            # the systematic ±2 ms quantisation error on every step trigger.
+            sleep = t_next - time.monotonic()
+            if sleep > 0.0:
+                self._wake.wait(timeout=sleep)
+                self._wake.clear()
+
             with self._lock:
                 if not self._running:
                     continue
-                if time.monotonic() < self._t_next:
+                # If a BPM/restart change woke us more than 1 ms early, loop to
+                # re-read the new t_next and recalculate sleep.
+                if time.monotonic() < self._t_next - 0.001:
                     continue
                 step      = self._step
                 total     = self.bars * self.STEPS
@@ -100,6 +133,7 @@ class Sequencer:
                 swing = self.swing
                 self._t_next += self.step_dur * (1.0 + swing if step % 2 == 0 else 1.0 - swing)
                 on_end = self.on_cycle_end if next_step == 0 else None
+
             if to_play:
                 _trigger_pads_batch(to_play, self.kit)
             if on_end:

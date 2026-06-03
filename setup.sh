@@ -128,11 +128,17 @@ After=sound.target
 Type=simple
 User=${USER_NAME}
 WorkingDirectory=${INSTALL_DIR}
+# Set CPU governor to performance before starting — prevents frequency scaling
+# from causing timing jitter in the audio sequencer.
+ExecStartPre=+/bin/sh -c 'echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor > /dev/null'
 ExecStart=${INSTALL_DIR}/.venv/bin/python3 ${INSTALL_DIR}/main.py --headless
 Restart=on-failure
 RestartSec=3
 Environment=PYTHONUNBUFFERED=1
-Nice=-5
+Nice=-10
+# Allow threads to raise their own real-time priority (used by PortAudio callback)
+LimitRTPRIO=80
+LimitNICE=-10
 
 [Install]
 WantedBy=multi-user.target

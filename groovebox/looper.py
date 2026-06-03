@@ -367,12 +367,12 @@ class LoopEngine:
             os.nice(-10)
         except (PermissionError, OSError, AttributeError):
             pass
-        # Compensated timing: accumulate a target rather than sleeping a fixed amount.
-        # Prevents sleep overshoot from drifting the phase over time.
+        # Compensated timing: accumulate an absolute target so oversleeps never
+        # drift the phase — each tick fires relative to the original start time.
         next_tick = time.monotonic()
         last      = next_tick
         while True:
-            next_tick += 0.002          # 2 ms ticks — halves max event-fire jitter vs 4 ms
+            next_tick += 0.002          # 2 ms ticks — fine enough for looper phase tracking
             now = time.monotonic()
             to_play: list[int | str] = []
             with self._lock:
@@ -394,8 +394,10 @@ class LoopEngine:
             sleep = next_tick - time.monotonic()
             if sleep > 0.0:
                 time.sleep(sleep)
-            else:
-                next_tick = time.monotonic()    # fell behind — reset, don't try to catch up
+            elif sleep < -0.020:
+                # Fell more than 20 ms behind (e.g. GIL held by render): skip
+                # the missed ticks and re-anchor rather than firing a burst.
+                next_tick = time.monotonic()
 
     def _tick_count_in(self, now: float) -> list:
         elapsed = now - self._ci_start
