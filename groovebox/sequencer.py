@@ -16,6 +16,7 @@ class Sequencer:
     def __init__(self, kit: Kit):
         self.kit       = kit
         self.bpm       = 120.0
+        self.swing     = 0.0   # 0.0 = straight, 0.5 = full triplet swing
         self.name      = "untitled"
         self._filepath: str | None = None
         # grid[pad][step] — all False by default
@@ -67,7 +68,9 @@ class Sequencer:
                 step    = self._step
                 to_play = [p for p in range(self.PADS) if self.grid[p][step]]
                 self._step   = (self._step + 1) % self.STEPS
-                self._t_next += self.step_dur
+                # Alternate step durations for swing; pairs still sum to 2 × step_dur
+                swing = self.swing
+                self._t_next += self.step_dur * (1.0 + swing if step % 2 == 0 else 1.0 - swing)
             if to_play:
                 _trigger_pads_batch(to_play, self.kit)
 

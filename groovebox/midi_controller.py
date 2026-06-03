@@ -73,7 +73,7 @@ CC_PAD: dict[int, tuple[str, int]] = {
 
 # ── Knob CCs (K1–K8 = CC 1–8) ──────────────────────────────────────────────
 CC_NOTE_REPEAT_FREQ = 1   # K1 — note-repeat rate
-CC_NOTE_REPEAT_VEL  = 2   # K2 — note-repeat velocity alternation
+CC_SWING            = 2   # K2 — swing (0 = straight, max = full triplet)
 CC_TEMPO            = 3   # K3 — BPM
 CC_VOLUME           = 4   # K4 — master volume
 CC_TRACK_LEN        = 5   # K5 — selected track loop length
@@ -252,13 +252,11 @@ class MidiController:
             self._show_overlay("REPEAT", labels[idx])
             return
 
-        # ── K2: note-repeat velocity alternation ─────────────────────────────
-        if control == CC_NOTE_REPEAT_VEL:
-            s = self._looper_screen()
-            if s and hasattr(s, "set_repeat_vel"):
-                s.set_repeat_vel(value / 127.0)
-            pct = int(value / 127.0 * 100)
-            self._show_overlay("RPT VEL", f"{pct}%")
+        # ── K2: swing ────────────────────────────────────────────────────────
+        if control == CC_SWING:
+            swing = (value / 127.0) * 0.5   # 0.0 straight → 0.5 full triplet
+            self._seq.swing = swing
+            self._show_overlay("SWING", f"{int(swing / 0.5 * 100)}%")
             return
 
         # ── K3: BPM ───────────────────────────────────────────────────────────
