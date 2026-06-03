@@ -201,7 +201,7 @@ class MidiController:
                     stack[-1].handle_keyup(key)
             return
 
-        if screen in ("LooperScreen", "SequencerScreen"):
+        if screen in ("LooperScreen", "SequencerScreen", "InstrumentsScreen"):
             self._key(key)
         else:
             if note == NOTE_TOP_RIGHT:

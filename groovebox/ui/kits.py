@@ -48,19 +48,9 @@ class KitsScreen(Screen):
             if self.selected == 0:
                 return KitsSavedScreen(self.kit)
             else:
-                kit_ref = self.kit
-                def on_name(name):
-                    kit_ref.name = name
-                    KITS_DIR.mkdir(exist_ok=True)
-                    existing = {f.stem for f in KITS_DIR.glob("*.json")} if KITS_DIR.exists() else set()
-                    slug = name.lower().replace(" ", "_").replace("-", "_")
-                    stem = slug or "kit"
-                    n = 1
-                    while stem in existing:
-                        stem = f"{slug}_{n:03d}"
-                        n += 1
-                    _save_kit(kit_ref, str(KITS_DIR / f"{stem}.json"))
-                return NameInputScreen("KIT NAME", self.kit.name or "", on_name)
+                self.kit.name = ""
+                self.kit.pads = [None] * len(self.kit.pads)
+                return InstrumentsScreen(self.kit, save_path=None)
         return None
 
 
