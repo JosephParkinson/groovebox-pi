@@ -85,3 +85,13 @@ def _load_state(kit: Kit, settings) -> None:
     ll = data.get("low_latency")
     if isinstance(ll, bool):
         settings.low_latency = ll
+    for attr in ("font_large", "font_medium", "font_small"):
+        val = data.get(attr)
+        if val in settings.FONT_SIZE_OPTIONS:
+            setattr(settings, attr, val)
+    oms = data.get("overlay_ms")
+    if oms in settings.OVERLAY_MS_OPTIONS:
+        settings.overlay_ms = oms
+    rot = data.get("rotation", 90)
+    if rot in settings.ROTATION_OPTIONS:
+        settings.rotation = rot

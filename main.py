@@ -22,6 +22,7 @@ import os
 import sys
 import threading
 import time
+from pathlib import Path
 
 from PIL import Image, ImageDraw
 
@@ -51,6 +52,17 @@ except ImportError:
 
 # ── Detect whether a display server is available ─────────────────────────────
 
+def _get_rotation() -> int:
+    """Read screen rotation from state.json before settings are fully loaded."""
+    try:
+        import json
+        data = json.loads(Path("state.json").read_text())
+        r = data.get("rotation", 90)
+        return r if r in (0, 90, 180, 270) else 90
+    except Exception:
+        return 90
+
+
 def _has_display() -> bool:
     return bool(
         os.environ.get("DISPLAY")
@@ -63,8 +75,6 @@ def _has_display() -> bool:
 
 def _build_app_state():
     """Create all shared model objects and configure audio before the stream opens."""
-    font  = find_font(20)
-    small = find_font(16)
     settings = Settings()
     kit      = Kit()
     _load_state(kit, settings)
@@ -74,20 +84,23 @@ def _build_app_state():
 
     engine = LoopEngine(kit, settings)
     seq    = Sequencer(kit)
-    return kit, engine, seq, settings, font, small
+    return kit, engine, seq, settings
 
 
 def _start_audio(kit):
-    if _AUDIO and not _WSL:
-        for attempt in range(5):
-            try:
-                _get_stream_mixer()
-                break
-            except Exception as exc:
-                print(f"[audio] init attempt {attempt + 1} failed: {exc}", file=sys.stderr)
-                if attempt < 4:
-                    time.sleep(1)
-    threading.Thread(target=lambda: _preload_all(kit), daemon=True).start()
+    """Start audio in background — retries up to 30 s so a slow/busy USB device doesn't block startup."""
+    def _init():
+        if _AUDIO and not _WSL:
+            for attempt in range(15):
+                try:
+                    _get_stream_mixer()
+                    print(f"[audio] ready (attempt {attempt + 1})")
+                    break
+                except Exception as exc:
+                    print(f"[audio] init attempt {attempt + 1} failed: {exc}", file=sys.stderr)
+                    time.sleep(2)
+        _preload_all(kit)
+    threading.Thread(target=_init, daemon=True).start()
 
 
 # ── Screen-stack helper ───────────────────────────────────────────────────────
@@ -125,7 +138,7 @@ class Groovebox:
         self.canvas.pack()
 
         (self.kit, self.engine, self.seq,
-         self.settings, self.font, self.small) = _build_app_state()
+         self.settings) = _build_app_state()
 
         self.stack: list[Screen] = [
             MainMenu(self.kit, self.engine, self.seq, self.settings)
@@ -198,7 +211,9 @@ class Groovebox:
         img  = Image.new("RGB", (WIDTH, HEIGHT), BG)
         draw = ImageDraw.Draw(img)
         if self.stack:
-            self.stack[-1].draw(draw, self.font, self.small)
+            font  = find_font(self.settings.font_medium)
+            small = find_font(self.settings.font_small)
+            self.stack[-1].draw(draw, font, small)
         return img
 
     def _tick(self):
@@ -249,12 +264,12 @@ def run_headless() -> None:
     # Brief pause so the SPI/I2S subsystem finishes initialising after boot
     time.sleep(2)
 
-    if not init_display():
+    if not init_display(_get_rotation()):
         print("[headless] ST7789 LCD not available — nothing to display. Exiting.",
               file=sys.stderr)
         sys.exit(1)
 
-    (kit, engine, seq, settings, font, small) = _build_app_state()
+    (kit, engine, seq, settings) = _build_app_state()
     _start_audio(kit)
 
     stack: list[Screen] = [MainMenu(kit, engine, seq, settings)]
@@ -276,25 +291,41 @@ def run_headless() -> None:
     clock = MidiClockMaster(engine)
     clock.connect()
 
-    frame_ms  = 66 if settings.low_latency else 40
-    frame_sec = frame_ms / 1000.0
+    # Render in a daemon thread at 10 fps.  PIL draw.text() with large fonts is a
+    # multi-millisecond C call that holds the GIL.  Keeping it in a separate thread
+    # and sleeping the main thread means the audio timing thread gets the GIL
+    # uncontested between frames rather than fighting with render work.
+    def _render_loop() -> None:
+        frame_sec = 0.100   # 10 fps is plenty for hardware UI
+        while True:
+            t0   = time.monotonic()
+            img  = Image.new("RGB", (WIDTH, HEIGHT), BG)
+            draw = ImageDraw.Draw(img)
+            if stack:
+                stack[-1].draw(draw,
+                               find_font(settings.font_medium),
+                               find_font(settings.font_small))
+            display_image(img)
+            elapsed = time.monotonic() - t0
+            sleep   = max(0.0, frame_sec - elapsed)
+            if sleep:
+                time.sleep(sleep)
+
+    threading.Thread(target=_render_loop, daemon=True).start()
+
+    # Main thread: keep the process alive; long sleep releases the GIL entirely.
     while True:
-        t0   = time.monotonic()
-        img  = Image.new("RGB", (WIDTH, HEIGHT), BG)
-        draw = ImageDraw.Draw(img)
-        if stack:
-            stack[-1].draw(draw, font, small)
-        display_image(img)
-        elapsed = time.monotonic() - t0
-        sleep   = max(0.0, frame_sec - elapsed)
-        if sleep:
-            time.sleep(sleep)
+        time.sleep(60)
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 def main():
-    init_display()   # no-op if ST7789 not present
+    # Give the audio timing thread the GIL every 1 ms instead of the default 5 ms.
+    # Reduces the maximum delay between timing ticks caused by other threads holding the GIL.
+    sys.setswitchinterval(0.001)
+
+    init_display(_get_rotation())   # no-op if ST7789 not present
 
     if "--headless" in sys.argv or not _has_display():
         run_headless()

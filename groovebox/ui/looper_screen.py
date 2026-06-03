@@ -3,12 +3,15 @@ import time
 
 from ..audio import _preload_all
 from ..constants import (
-    FG, FG_DIM, HIGHLIGHT, GREEN, WHITE, BG, WIDTH,
+    FG, FG_DIM, HIGHLIGHT, GREEN, WHITE, BG, WIDTH, HEIGHT,
     RED, AMBER, KEY_MAP,
 )
 from ..kit import Kit
 from ..looper import LoopEngine, ChanState
-from .base import Screen
+from .base import Screen, find_font, centered_x
+
+# Knob overlay: show big text for 1.5 s after a knob is turned
+_OVERLAY_TTL = 1.5
 
 _HOLD_SECS  = 0.7
 
@@ -50,12 +53,22 @@ def _bar_y(idx: int) -> tuple[int, int]:
 
 class LooperScreen(Screen):
 
-    def __init__(self, kit: Kit, engine: LoopEngine):
+    def __init__(self, kit: Kit, engine: LoopEngine, settings=None):
         self.kit         = kit
         self.engine      = engine
+        self.settings    = settings
         self.cursor      = 0
         self._press_times:  dict[int, float] = {}
         self._hold_deleted: set[int]         = set()
+        # Knob overlay
+        self._overlay_label: str   = ""
+        self._overlay_value: str   = ""
+        self._overlay_t:    float  = 0.0
+        self._overlay_font         = find_font(64)
+        # Note repeat
+        self._repeat_interval: float | None = None   # seconds between repeats (None=off)
+        self._repeat_vel_norm: float        = 0.5    # 0=only-onbeat, 0.5=equal, 1=only-offbeat
+        self._held_pads: dict[int, threading.Event] = {}
         threading.Thread(target=lambda: _preload_all(kit), daemon=True).start()
         threading.Thread(target=self._hold_watcher, daemon=True).start()
 
@@ -69,9 +82,45 @@ class LooperScreen(Screen):
                     self._hold_deleted.add(ch)
                     self.engine.delete_channel(ch)
 
+    # ── Knob overlay ─────────────────────────────────────────────────────────
+
+    def show_knob_overlay(self, label: str, value: str) -> None:
+        self._overlay_label = label
+        self._overlay_value = value
+        self._overlay_t     = time.monotonic()
+
+    def set_repeat_freq(self, freq) -> None:
+        if freq is None:
+            self._repeat_interval = None
+        else:
+            self._repeat_interval = self.engine.beat_dur * 4.0 * freq
+
+    def set_repeat_vel(self, normalized: float) -> None:
+        self._repeat_vel_norm = max(0.0, min(1.0, normalized))
+
+    def _draw_overlay(self, draw, font) -> None:
+        label = self._overlay_label
+        value = self._overlay_value
+        lb    = draw.textbbox((0, 0), label, font=font)
+        lh    = lb[3] - lb[1]
+        vb    = draw.textbbox((0, 0), value, font=self._overlay_font)
+        vh    = vb[3] - vb[1]
+        vw    = vb[2] - vb[0]
+        total = lh + 12 + vh
+        label_y = (HEIGHT - total) // 2
+        value_y = label_y + lh + 12
+        draw.text((centered_x(draw, label, font), label_y), label, fill=FG_DIM, font=font)
+        draw.text(((WIDTH - vw) // 2, value_y),             value, fill=WHITE,  font=self._overlay_font)
+
     # ── Drawing ───────────────────────────────────────────────────────────────
 
     def draw(self, draw, font, small):
+        # Show knob overlay if recently turned
+        ttl = (self.settings.overlay_ms / 1000.0) if self.settings else _OVERLAY_TTL
+        if self._overlay_t and time.monotonic() - self._overlay_t < ttl:
+            self._draw_overlay(draw, font)
+            return
+
         # Top strip (y=0..11): metronome symbol left, BPM right
         met_sym = "●" if self.engine.metronome else "○"
         bpm_txt = f"{met_sym} {int(self.engine.bpm)}"
@@ -254,11 +303,43 @@ class LooperScreen(Screen):
                 self._press_times[ch] = time.monotonic()
                 self.engine.prime(ch)
         elif key.lower() in KEY_MAP:
-            self.engine.note(KEY_MAP[key.lower()])
+            pad = KEY_MAP[key.lower()]
+            on_g, off_g = self._repeat_gains()
+            self.engine.note(pad, gain=on_g)   # original press = on-beat
+            if self._repeat_interval is not None and key.lower() not in self._held_pads:
+                stop_ev = threading.Event()
+                self._held_pads[key.lower()] = stop_ev
+                threading.Thread(
+                    target=self._run_repeat, args=(pad, stop_ev), daemon=True
+                ).start()
         return None
+
+    def _repeat_gains(self):
+        n = self._repeat_vel_norm
+        on  = min(1.0, max(0.0, 2.0 * (1.0 - n)))
+        off = min(1.0, max(0.0, 2.0 * n))
+        return on, off
+
+    def _run_repeat(self, pad: int, stop_ev: threading.Event) -> None:
+        beat = 0
+        _, off_g = self._repeat_gains()
+        while True:
+            interval = self._repeat_interval
+            if interval is None or stop_ev.wait(timeout=interval):
+                break
+            beat += 1
+            is_offbeat = (beat % 2) == 1
+            on_g, off_g = self._repeat_gains()
+            gain = off_g if is_offbeat else on_g
+            if gain > 0:
+                self.engine.note(pad, gain=gain)
 
     def handle_keyup(self, key):
         if key in "1234":
             ch = int(key) - 1
             self._press_times.pop(ch, None)
             self._hold_deleted.discard(ch)
+        elif key.lower() in KEY_MAP:
+            ev = self._held_pads.pop(key.lower(), None)
+            if ev:
+                ev.set()

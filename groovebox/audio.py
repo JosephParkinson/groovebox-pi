@@ -172,15 +172,13 @@ def _get_win_audio() -> _WinAudioServer:
 
 # ── Stream mixer (Mac / Pi) ───────────────────────────────────────────────────
 #
-# ── Stream-mixer configuration (set by configure() before the first trigger) ──
-# Low-latency:  44100 Hz / 128 blocks  → ~2.9 ms block time
-# High-quality: 44100 Hz / 256 blocks  → ~5.8 ms, slightly less CPU
-#
-# 44100 Hz is used in both modes for broad hardware compatibility
-# (USB audio interfaces typically do not support 22050 Hz).
+# Block size is kept at 512 for both modes.  256 gives fractionally lower
+# latency but on the Pi the Python GIL overhead means the callback misses its
+# 5.8 ms window under load, producing xruns.  512 (≈11.6 ms) gives enough
+# headroom while keeping scheduled-event timing well inside a 16th note.
 
 MIXER_SAMPLERATE: int = 44100
-MIXER_BLOCKSIZE:  int = 256
+MIXER_BLOCKSIZE:  int = 512
 
 
 def configure_audio(low_latency: bool) -> None:
@@ -189,10 +187,18 @@ def configure_audio(low_latency: bool) -> None:
     Has no effect once _get_stream_mixer() has been called.
     """
     global MIXER_SAMPLERATE, MIXER_BLOCKSIZE
-    if low_latency:
-        MIXER_SAMPLERATE, MIXER_BLOCKSIZE = 44100, 256
-    else:
-        MIXER_SAMPLERATE, MIXER_BLOCKSIZE = 44100, 512
+    MIXER_SAMPLERATE = 44100
+    MIXER_BLOCKSIZE  = 512   # 11.6 ms per block — safe headroom on Pi in both modes
+
+
+class _Voice:
+    """One playing sample.  __slots__ keeps attribute access fast inside the callback."""
+    __slots__ = ("data", "pos", "gain")
+
+    def __init__(self, data: "np.ndarray", gain: float) -> None:
+        self.data = data
+        self.pos  = 0
+        self.gain = gain
 
 
 class _StreamMixer:
@@ -207,6 +213,7 @@ class _StreamMixer:
             channels=2,
             dtype="float32",
             blocksize=MIXER_BLOCKSIZE,
+            latency=0.05,               # 50 ms total output budget — prevents xruns on Pi
             callback=self._callback,
         )
         self._stream.start()
@@ -232,15 +239,17 @@ class _StreamMixer:
         except Exception as e:
             print(f"StreamMixer load: {e}", file=sys.stderr)
 
-    def play(self, path: str) -> None:
-        """Queue a sample for immediate playback. Returns instantly."""
+    def play(self, path: str, gain: float = 1.0) -> None:
+        """Queue a sample for immediate playback. Lazy-loads if not yet cached."""
         data = self._samples.get(path)
         if data is None:
             threading.Thread(target=self.load, args=(path,), daemon=True).start()
             return
-        self._queue.append({"data": data, "pos": 0})
+        self._queue.append(_Voice(data, gain))
 
     def _callback(self, outdata: "np.ndarray", frames: int, time, status) -> None:
+        if status:
+            print(f"[audio] xrun: {status}", file=sys.stderr)
         # GIL-atomic deque drain — no locking needed
         while self._queue:
             try:
@@ -249,19 +258,25 @@ class _StreamMixer:
                 break
 
         outdata.fill(0.0)
-        still_active = []
-        for v in self._active:
-            n = min(frames, len(v["data"]) - v["pos"])
-            outdata[:n] += v["data"][v["pos"]: v["pos"] + n]
-            v["pos"] += n
-            if v["pos"] < len(v["data"]):
-                still_active.append(v)
-        self._active = still_active
+        i = 0
+        while i < len(self._active):
+            v = self._active[i]
+            n = min(frames, len(v.data) - v.pos)
+            if v.gain == 1.0:
+                outdata[:n] += v.data[v.pos: v.pos + n]
+            else:
+                outdata[:n] += v.data[v.pos: v.pos + n] * v.gain
+            v.pos += n
+            if v.pos < len(v.data):
+                i += 1
+            else:
+                del self._active[i]   # remove finished voice in-place — no list rebuild
 
-        if self._volume != 1.0:
-            outdata *= self._volume
+        vol = self._volume
+        if vol != 1.0:
+            outdata *= vol
         # Clip only when multiple voices could sum above ±1.0
-        if len(still_active) > 1:
+        if len(self._active) > 1:
             np.clip(outdata, -1.0, 1.0, out=outdata)
 
 
@@ -289,10 +304,10 @@ def preload_wav(path: str) -> None:
         _get_stream_mixer().load(path)
 
 
-def play_wav(path: str) -> None:
+def play_wav(path: str, gain: float = 1.0) -> None:
     """Play a WAV file on Mac / Pi. Returns immediately."""
     if _AUDIO:
-        _get_stream_mixer().play(path)
+        _get_stream_mixer().play(path, gain=gain)
         return
     # Fallback when sounddevice is unavailable
     def _run():
@@ -305,7 +320,7 @@ def play_wav(path: str) -> None:
     threading.Thread(target=_run, daemon=True).start()
 
 
-def _trigger_pad(pad: int, kit) -> None:
+def _trigger_pad(pad: int, kit, gain: float = 1.0) -> None:
     """Non-blocking single-pad trigger — safe to call from the UI thread."""
     path = kit.pads[pad]
     if not path or isinstance(path, dict):   # dict = seq pad, no audio here
@@ -313,7 +328,7 @@ def _trigger_pad(pad: int, kit) -> None:
     if _WSL and shutil.which("powershell.exe"):
         threading.Thread(target=lambda: _get_win_audio().play_pad(pad), daemon=True).start()
     else:
-        play_wav(path)
+        play_wav(path, gain=gain)
 
 
 _PS_AVAILABLE: bool | None = None

@@ -31,7 +31,7 @@ except ImportError:
 _lcd = None
 
 
-def init_display() -> bool:
+def init_display(rotation: int = 90) -> bool:
     """
     Initialise the Pirate Audio ST7789 LCD.
     Retries a few times in case the SPI device is momentarily busy after boot.
@@ -47,7 +47,7 @@ def init_display() -> bool:
                 cs=1,                 # SPI CE1 — BCM 7 on Pirate Audio
                 dc=9,                 # BCM 9
                 backlight=13,         # BCM 13
-                rotation=90,          # correct orientation for Pirate Audio
+                rotation=rotation,
                 spi_speed_hz=80_000_000,
                 width=240,
                 height=240,

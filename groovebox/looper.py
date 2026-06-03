@@ -158,7 +158,7 @@ class LoopEngine:
                 c.events.sort(key=lambda e: e.beat)
                 c.state = ChanState.PLAYING
 
-    def note(self, pad: int) -> None:
+    def note(self, pad: int, gain: float = 1.0) -> None:
         """Play a pad hit and record it to all active recording/overdubbing channels."""
         pad_entry = self.kit.pads[pad] if pad < len(self.kit.pads) else None
         if isinstance(pad_entry, dict) and "seq_file" in pad_entry:
@@ -168,7 +168,7 @@ class LoopEngine:
                 daemon=True,
             ).start()
             return
-        _trigger_pad(pad, self.kit)
+        _trigger_pad(pad, self.kit, gain=gain)
         with self._lock:
             if self._phase == "count_in":
                 # If the hit lands within one quantisation step of the downbeat,
@@ -238,6 +238,23 @@ class LoopEngine:
                 if c.is_seq_track and c.seq_grid:
                     c.events = _seq_to_events(c.seq_grid, c.bars)
                     c._fired = set()
+
+    def set_bars_absolute(self, ch: int, bars: int) -> None:
+        """Set loop length directly (used by knob). Only effective when channel is EMPTY."""
+        with self._lock:
+            c = self.channels[ch]
+            if c.state == ChanState.EMPTY:
+                c.bars = bars
+                if c.is_seq_track and c.seq_grid and not c.seq_one_shot:
+                    c.events = _seq_to_events(c.seq_grid, bars)
+                    c._fired = set()
+
+    def set_rec_mode(self, ch: int, mode: str) -> None:
+        """Set recording mode directly (used by knob)."""
+        with self._lock:
+            c = self.channels[ch]
+            if not c.is_seq_track and mode in ("loop", "overdub", "one_shot"):
+                c.rec_mode = mode
 
     def load_seq_track(self, ch: int, path: str, one_shot: bool = False) -> None:
         """Load a sequence JSON into channel ch. Channel goes EMPTY — arm with 1-4 to play."""
@@ -343,12 +360,15 @@ class LoopEngine:
     def _run(self) -> None:
         import os
         try:
-            os.nice(-5)   # ask the scheduler to favour this thread; ignored without CAP_SYS_NICE
+            os.nice(-10)
         except (PermissionError, OSError, AttributeError):
             pass
-        last = time.monotonic()
+        # Compensated timing: accumulate a target rather than sleeping a fixed amount.
+        # Prevents sleep overshoot from drifting the phase over time.
+        next_tick = time.monotonic()
+        last      = next_tick
         while True:
-            time.sleep(0.004)
+            next_tick += 0.002          # 2 ms ticks — halves max event-fire jitter vs 4 ms
             now = time.monotonic()
             to_play: list[int | str] = []
             with self._lock:
@@ -356,16 +376,22 @@ class LoopEngine:
                     to_play = self._tick_count_in(now)
                 elif self._phase == "running":
                     to_play = self._tick_running(now, last)
+            # Fire audio DIRECTLY — _trigger_pads_batch / play_wav are both O(1)
+            # deque.append() calls.  Spawning a thread here was the single largest
+            # source of timing jitter (OS call + GIL churn every event).
             if to_play:
                 hats = [x for x in to_play if x == "hat"]
-                pads = [x for x in to_play if x != "hat"]
-                def _fire(hats=hats, pads=pads):
-                    if hats:
-                        self._play_hat()
-                    if pads:
-                        _trigger_pads_batch(pads, self.kit)
-                threading.Thread(target=_fire, daemon=True).start()
-            last = now
+                pads = [x for x in to_play if isinstance(x, int)]
+                if hats:
+                    self._play_hat()
+                if pads:
+                    _trigger_pads_batch(pads, self.kit)
+            last  = now
+            sleep = next_tick - time.monotonic()
+            if sleep > 0.0:
+                time.sleep(sleep)
+            else:
+                next_tick = time.monotonic()    # fell behind — reset, don't try to catch up
 
     def _tick_count_in(self, now: float) -> list:
         elapsed = now - self._ci_start

@@ -11,15 +11,30 @@ from ..constants import (
 )
 
 
+_font_cache: dict[int, ImageFont.FreeTypeFont] = {}
+
 def find_font(size: int) -> ImageFont.FreeTypeFont:
+    if size in _font_cache:
+        return _font_cache[size]
     for path in [
+        # Raspberry Pi / Raspbian (DejaVu — always present)
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+        # Ubuntu
+        "/usr/share/fonts/truetype/ubuntu/Ubuntu-R.ttf",
         "/usr/share/fonts/truetype/ubuntu/UbuntuMono-R.ttf",
+        # macOS
+        "/System/Library/Fonts/Helvetica.ttc",
         "/System/Library/Fonts/Supplemental/Monaco.ttf",
         "/Library/Fonts/Courier New.ttf",
     ]:
         if Path(path).exists():
-            return ImageFont.truetype(path, size)
-    return ImageFont.load_default()
+            f = ImageFont.truetype(path, size)
+            _font_cache[size] = f
+            return f
+    f = ImageFont.load_default()
+    _font_cache[size] = f
+    return f
 
 
 def pil_to_tk(img: Image.Image) -> tk.PhotoImage:

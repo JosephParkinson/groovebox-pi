@@ -20,7 +20,7 @@ class MainMenu(Screen):
         self.settings = settings
         self.selected = 0
         self._options = [
-            ("PLAY",      lambda: LooperScreen(self.kit, self.engine)),
+            ("PLAY",      lambda: LooperScreen(self.kit, self.engine, self.settings)),
             ("KITS",      lambda: KitsScreen(self.kit)),
             ("SEQUENCER", lambda: SequencerScreen(self.seq)),
             ("SETTINGS",  lambda: SettingsScreen(self.settings)),

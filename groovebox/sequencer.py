@@ -54,11 +54,11 @@ class Sequencer:
     def _run(self) -> None:
         import os
         try:
-            os.nice(-5)
+            os.nice(-10)
         except (PermissionError, OSError, AttributeError):
             pass
         while True:
-            time.sleep(0.004)
+            time.sleep(0.002)   # 2 ms polling — matches looper tick resolution
             with self._lock:
                 if not self._running:
                     continue

@@ -70,9 +70,30 @@ CC_PAD: dict[int, tuple[str, int]] = {
     20: ("mute", 0),  21: ("mute", 1),  22: ("mute", 2),  23: ("mute", 3),
 }
 
-# ── Knob CCs ────────────────────────────────────────────────────────────────
-CC_VOLUME = 1     # K1 top-left  — master volume
-CC_TEMPO  = 4     # K4 top-right — tempo
+# ── Knob CCs (K1–K8 = CC 1–8) ──────────────────────────────────────────────
+CC_NOTE_REPEAT_FREQ = 1   # K1 — note-repeat rate
+CC_NOTE_REPEAT_VEL  = 2   # K2 — note-repeat velocity alternation
+CC_TEMPO            = 3   # K3 — BPM
+CC_VOLUME           = 4   # K4 — master volume
+CC_TRACK_LEN        = 5   # K5 — selected track loop length
+CC_TRACK_TYPE       = 6   # K6 — selected track mode
+CC_TRACK_QUANT      = 7   # K7 — selected track quantization
+CC_TRACK_VOL        = 8   # K8 — (reserved for per-track volume)
+
+# Note-repeat frequency table: CC range 0-127 split into 7 equal segments
+# None = off, otherwise the note value as a multiplier of beat_dur
+# 1 whole = 4 beats, 1/4 = 1 beat, 1/16 = 0.25 beats, etc.
+_REPEAT_FREQS = [None, 1.0, 0.5, 0.25, 0.125, 0.0625, 0.03125]
+
+# Per-track loop lengths (K5)
+_LOOP_LENGTHS = (1, 2, 4, 8, 16)
+
+# Per-track modes (K6)
+_LOOP_MODES = ("loop", "overdub", "one_shot")
+_LOOP_MODE_LABELS = {"loop": "LOOP", "overdub": "OVRDUB", "one_shot": "1SHOT"}
+
+# Quantize options (K7)
+_QUANT_OPTS = ("1/2", "1/4", "1/8", "1/16", "1/32")
 
 # ── Prog-change pad layout (all active on every screen) ────────────────────
 #   Bottom row:  P1=PC0  P2=PC1  P3=PC2  P4=PC3
@@ -147,42 +168,126 @@ class MidiController:
         stack = self._stack_getter()
         return type(stack[-1]).__name__ if stack else ""
 
+    def _looper_screen(self):
+        """Return the LooperScreen if it's the current screen, else None."""
+        stack = self._stack_getter()
+        s = stack[-1] if stack else None
+        return s if (s and type(s).__name__ == "LooperScreen") else None
+
+    def _show_overlay(self, label: str, value: str) -> None:
+        s = self._looper_screen()
+        if s and hasattr(s, "show_knob_overlay"):
+            s.show_knob_overlay(label, value)
+
+    @staticmethod
+    def _segment(value: int, n_options: int) -> int:
+        """Map a CC value 0-127 to an index 0..n_options-1."""
+        return min(n_options - 1, value * n_options // 128)
+
     # ── MIDI callbacks (called from background MIDI thread) ───────────────────
 
     def _on_note(self, note: int, velocity: int) -> None:
-        if velocity == 0:
-            return
         key = NOTE_TO_KEY.get(note)
         if key is None:
             return
 
         screen = self._screen()
+
+        if velocity == 0:
+            # Note-off: stop note-repeat if running in LooperScreen
+            if screen == "LooperScreen":
+                stack = self._stack_getter()
+                if stack:
+                    stack[-1].handle_keyup(key)
+            return
+
         if screen in ("LooperScreen", "SequencerScreen"):
-            # Inside play / seq: pads trigger kit sounds via existing key handler
             self._key(key)
         else:
-            # Outside play / seq: P8 = Enter, P7 = Back
             if note == NOTE_TOP_RIGHT:
                 self._key("Return")
             elif note == NOTE_TOP_BACK:
                 self._key("BackSpace")
 
     def _on_cc(self, control: int, value: int) -> None:
+        # ── K1: note-repeat frequency ────────────────────────────────────────
+        if control == CC_NOTE_REPEAT_FREQ:
+            idx = self._segment(value, len(_REPEAT_FREQS))
+            freq = _REPEAT_FREQS[idx]
+            s = self._looper_screen()
+            if s and hasattr(s, "set_repeat_freq"):
+                s.set_repeat_freq(freq)
+            labels = ["OFF", "1", "1/2", "1/4", "1/8", "1/16", "1/32"]
+            self._show_overlay("REPEAT", labels[idx])
+            return
+
+        # ── K2: note-repeat velocity alternation ─────────────────────────────
+        if control == CC_NOTE_REPEAT_VEL:
+            s = self._looper_screen()
+            if s and hasattr(s, "set_repeat_vel"):
+                s.set_repeat_vel(value / 127.0)
+            pct = int(value / 127.0 * 100)
+            self._show_overlay("RPT VEL", f"{pct}%")
+            return
+
+        # ── K3: BPM ───────────────────────────────────────────────────────────
         if control == CC_TEMPO:
-            bpm = 40.0 + value * 2.0          # 0→40, 127→294
+            bpm = 40.0 + value * 2.0
             self._engine.bpm = bpm
             self._seq.bpm    = bpm
+            self._show_overlay("BPM", str(int(bpm)))
             return
 
+        # ── K4: master volume ─────────────────────────────────────────────────
         if control == CC_VOLUME:
             from groovebox.audio import set_master_volume
-            set_master_volume(value / 127.0)
+            vol = value / 127.0
+            set_master_volume(vol)
+            self._show_overlay("VOL", str(int(vol * 100)))
             return
 
-        # CC pad (CC-button mode active on the MPK Mini)
+        # ── K5: selected track loop length ────────────────────────────────────
+        if control == CC_TRACK_LEN:
+            s = self._looper_screen()
+            if s:
+                ch   = s.cursor
+                idx  = self._segment(value, len(_LOOP_LENGTHS))
+                bars = _LOOP_LENGTHS[idx]
+                self._engine.set_bars_absolute(ch, bars)
+                self._show_overlay("BARS", str(bars))
+            return
+
+        # ── K6: selected track mode ───────────────────────────────────────────
+        if control == CC_TRACK_TYPE:
+            s = self._looper_screen()
+            if s:
+                ch   = s.cursor
+                idx  = self._segment(value, len(_LOOP_MODES))
+                mode = _LOOP_MODES[idx]
+                self._engine.set_rec_mode(ch, mode)
+                self._show_overlay("MODE", _LOOP_MODE_LABELS[mode])
+            return
+
+        # ── K7: quantization ─────────────────────────────────────────────────
+        if control == CC_TRACK_QUANT:
+            idx  = self._segment(value, len(_QUANT_OPTS))
+            qval = _QUANT_OPTS[idx]
+            self._engine.settings.quantize = qval
+            self._engine.settings.save()
+            self._show_overlay("QUANT", qval)
+            return
+
+        # ── K8: track select (left=track 1, right=track 4) — no overlay ────────
+        if control == CC_TRACK_VOL:
+            s = self._looper_screen()
+            if s:
+                s.cursor = self._segment(value, 4)
+            return
+
+        # ── CC pad (CC-button mode active on the MPK Mini) ───────────────────
         if control in CC_PAD:
             if value == 0:
-                return   # pad release — ignore
+                return
             if self._screen() != "LooperScreen":
                 return
             action, ch = CC_PAD[control]

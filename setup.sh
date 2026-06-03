@@ -128,10 +128,11 @@ After=sound.target
 Type=simple
 User=${USER_NAME}
 WorkingDirectory=${INSTALL_DIR}
-ExecStart=${INSTALL_DIR}/.venv/bin/python ${INSTALL_DIR}/main.py --headless
+ExecStart=${INSTALL_DIR}/.venv/bin/python3 ${INSTALL_DIR}/main.py --headless
 Restart=on-failure
 RestartSec=3
 Environment=PYTHONUNBUFFERED=1
+Nice=-5
 
 [Install]
 WantedBy=multi-user.target
