@@ -13,7 +13,7 @@ from .base import Screen, centered_x
 
 _DEV_ROW_H   = 22   # height per device row
 _LOG_ROW_H   = 22   # height per log entry
-_LOG_ENTRIES = 3    # number of log lines shown
+_LOG_ENTRIES = 2    # number of log lines shown (reduced from 3 to fit power row)
 _BTN_H       = 40   # test-button height
 
 
@@ -41,6 +41,7 @@ class DebugScreen(Screen):
             ("Clock",   dc.get("clock",  ("—", False))),
             ("LCD",     dc.get("lcd",    ("—", False))),
             ("GPIO",    dc.get("gpio",   ("—", False))),
+            ("Power",   dc.get("power",  ("—", False))),
         ]:
             col = GREEN if ok else RED
             draw.text((6,  y + 4), f"{label}:", fill=FG_DIM, font=small)
@@ -84,6 +85,7 @@ class DebugScreen(Screen):
             "clock": self._clock_info(),
             "lcd":   self._lcd_info(),
             "gpio":  self._gpio_info(),
+            "power": self._power_info(),
         }
 
     def _audio_info(self) -> tuple[str, bool]:
@@ -140,6 +142,28 @@ class DebugScreen(Screen):
             return (gpio_status()[:24], ok)
         except Exception as exc:
             return (str(exc)[:24], False)
+
+    def _power_info(self) -> tuple[str, bool]:
+        try:
+            import subprocess
+            t = subprocess.run(["vcgencmd", "get_throttled"],
+                               capture_output=True, text=True, timeout=1)
+            flags = int(t.stdout.strip().split("=")[1], 16)
+            f = subprocess.run(["vcgencmd", "measure_clock", "arm"],
+                               capture_output=True, text=True, timeout=1)
+            mhz = int(f.stdout.strip().split("=")[1]) // 1_000_000
+
+            if flags & 0x1:    # currently under-voltage
+                return (f"UNDER-VOLT {mhz}MHz", False)
+            if flags & 0x4:    # currently throttled
+                return (f"THROTTLED {mhz}MHz", False)
+            if flags & 0x50000:  # was under-voltage or throttled since boot
+                return (f"was throttled {mhz}MHz", False)
+            return (f"OK  {mhz} MHz", True)
+        except FileNotFoundError:
+            return ("N/A (not Pi)", True)
+        except Exception:
+            return ("check failed", False)
 
     # ── Input ─────────────────────────────────────────────────────────────────
 
