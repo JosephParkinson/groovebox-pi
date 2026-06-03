@@ -16,14 +16,15 @@ except Exception:
 class MidiHandler:
     """Non-blocking MIDI listener that runs on a daemon thread."""
 
-    def __init__(self, on_note=None, on_cc=None):
-        """
-        on_note(note: int, velocity: int) — velocity 0 means note-off
-        on_cc(control: int, value: int)
-        """
-        self.on_note = on_note
-        self.on_cc   = on_cc
+    def __init__(self, on_note=None, on_cc=None,
+                 on_pitchwheel=None, on_program_change=None):
+        self.on_note            = on_note
+        self.on_cc              = on_cc
+        self.on_pitchwheel      = on_pitchwheel
+        self.on_program_change  = on_program_change
         self._thread: threading.Thread | None = None
+        self._port              = None   # active mido port object
+        self._active_port: str | None = None
 
     def list_ports(self) -> list[str]:
         if not _AVAILABLE:
@@ -33,8 +34,11 @@ class MidiHandler:
         except Exception:
             return []
 
+    def active_port(self) -> str | None:
+        return self._active_port
+
     def connect(self, port_name: str | None = None) -> bool:
-        """Start listening. Uses the first available port if none is specified."""
+        """Open a MIDI input port, closing any existing one first."""
         ports = self.list_ports()
         if not ports:
             print("MIDI: no input ports found", file=sys.stderr)
@@ -43,31 +47,65 @@ class MidiHandler:
         if target not in ports:
             print(f"MIDI: port '{target}' not found. Available: {ports}", file=sys.stderr)
             return False
+        self._close_port()
         self._thread = threading.Thread(target=self._listen, args=(target,), daemon=True)
         self._thread.start()
         print(f"MIDI: listening on '{target}'")
         return True
 
+    def _close_port(self) -> None:
+        if self._port is not None:
+            try:
+                self._port.close()
+            except Exception:
+                pass
+            self._port = None
+        self._active_port = None
+
     def _listen(self, port_name: str):
+        from groovebox.event_log import push as log_push
         try:
             with mido.open_input(port_name) as port:
+                self._port        = port
+                self._active_port = port_name
                 for msg in port:
-                    if msg.type == "note_on" and self.on_note:
-                        self.on_note(msg.note, msg.velocity)
-                    elif msg.type == "note_off" and self.on_note:
-                        self.on_note(msg.note, 0)
-                    elif msg.type == "control_change" and self.on_cc:
-                        self.on_cc(msg.control, msg.value)
+                    if msg.type == "note_on":
+                        log_push("MIDI", f"note {msg.note} vel {msg.velocity}")
+                        if self.on_note:
+                            self.on_note(msg.note, msg.velocity)
+                    elif msg.type == "note_off":
+                        log_push("MIDI", f"note_off {msg.note}")
+                        if self.on_note:
+                            self.on_note(msg.note, 0)
+                    elif msg.type == "control_change":
+                        log_push("MIDI", f"cc {msg.control} val {msg.value}")
+                        if self.on_cc:
+                            self.on_cc(msg.control, msg.value)
+                    elif msg.type == "pitchwheel":
+                        log_push("MIDI", f"pitch {msg.pitch}")
+                        if self.on_pitchwheel:
+                            self.on_pitchwheel(msg.pitch)
+                    elif msg.type == "program_change":
+                        log_push("MIDI", f"prog {msg.program}")
+                        if self.on_program_change:
+                            self.on_program_change(msg.program)
+                    else:
+                        log_push("MIDI", str(msg)[:28])
         except Exception as e:
-            print(f"MIDI error: {e}", file=sys.stderr)
+            print(f"MIDI: lost '{port_name}': {e}", file=sys.stderr)
+        finally:
+            self._port        = None
+            self._active_port = None
 
 
 if __name__ == "__main__":
     import time
 
     handler = MidiHandler(
-        on_note=lambda note, vel: print(f"note  {note:3d}  vel {vel}"),
-        on_cc  =lambda ctrl, val: print(f"cc    {ctrl:3d}  val {val}"),
+        on_note           = lambda note, vel:  print(f"note  {note:3d}  vel {vel}"),
+        on_cc             = lambda ctrl, val:  print(f"cc    {ctrl:3d}  val {val}"),
+        on_pitchwheel     = lambda pitch:      print(f"pitch {pitch}"),
+        on_program_change = lambda prog:       print(f"prog  {prog}"),
     )
 
     ports = handler.list_ports()

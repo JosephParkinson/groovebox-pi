@@ -1,4 +1,6 @@
 Pillow
 mido
 python-rtmidi
-simpleaudio
+sounddevice
+soundfile
+numpy

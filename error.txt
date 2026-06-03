@@ -1,0 +1,10 @@
+((.venv) ) (base) MacBookPro:groovebox-pi user$ /Users/user/groovebox-pi/.venv/bin/python /Users/user/groovebox-pi/main.py
+Exception ignored from cffi callback <function _StreamBase.__init__.<locals>.callback_ptr at 0x107666400>:
+Traceback (most recent call last):
+  File "/Users/user/groovebox-pi/.venv/lib/python3.14/site-packages/sounddevice.py", line 878, in callback_ptr
+    return _wrap_callback(callback, data, frames, time, status)
+  File "/Users/user/groovebox-pi/.venv/lib/python3.14/site-packages/sounddevice.py", line 2777, in _wrap_callback
+    callback(*args)
+  File "/Users/user/groovebox-pi/groovebox/audio.py", line 250, in _callback
+    self._active.remove(v)
+ValueError: operands could not be broadcast together with shapes (60000,2) (9460,2) 
