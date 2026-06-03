@@ -145,10 +145,12 @@ class PadAssignScreen(Screen):
     def _load_entries(self):
         if not self._cwd.exists():
             return []
-        dirs  = sorted([p for p in self._cwd.iterdir() if p.is_dir()],
+        dirs  = sorted([p for p in self._cwd.iterdir()
+                        if p.is_dir() and not p.name.startswith(".")],
                        key=lambda p: p.name.lower())
         files = sorted([p for p in self._cwd.iterdir()
-                        if p.is_file() and p.suffix.lower() == ".wav"],
+                        if p.is_file() and p.suffix.lower() == ".wav"
+                        and not p.name.startswith(".")],
                        key=lambda p: p.name.lower())
         return dirs + files
 
