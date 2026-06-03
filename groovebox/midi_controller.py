@@ -314,16 +314,17 @@ class MidiController:
             return
 
         # ── CC pad (CC-button mode active on the MPK Mini) ───────────────────
+        # Mute pads are latching: 127 = light ON = mute, 0 = light OFF = unmute.
+        # Arm pads only fire on press (value > 0).
         if control in CC_PAD:
-            if value == 0:
-                return
             if self._screen() != "LooperScreen":
                 return
             action, ch = CC_PAD[control]
             if action == "arm":
-                self._engine.prime(ch)
+                if value > 0:
+                    self._engine.prime(ch)
             elif action == "mute":
-                self._engine.toggle_mute(ch)
+                self._engine.set_mute(ch, value > 0)
 
     def _on_pitchwheel(self, pitch: int) -> None:
         # pitch: -8192 … +8191

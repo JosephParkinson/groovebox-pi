@@ -205,6 +205,10 @@ class LoopEngine:
         with self._lock:
             self.channels[ch].muted = not self.channels[ch].muted
 
+    def set_mute(self, ch: int, muted: bool) -> None:
+        with self._lock:
+            self.channels[ch].muted = muted
+
     def cycle_rec_mode(self, ch: int) -> None:
         """Cycle loop → overdub → one_shot (or toggle seq_one_shot for seq tracks)."""
         with self._lock:
