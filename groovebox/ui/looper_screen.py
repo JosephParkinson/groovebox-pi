@@ -304,14 +304,23 @@ class LooperScreen(Screen):
                 self.engine.prime(ch)
         elif key.lower() in KEY_MAP:
             pad = KEY_MAP[key.lower()]
-            on_g, off_g = self._repeat_gains()
-            self.engine.note(pad, gain=on_g)   # original press = on-beat
-            if self._repeat_interval is not None and key.lower() not in self._held_pads:
+            on_g, _ = self._repeat_gains()
+            interval = self._repeat_interval
+            if interval is not None and key.lower() not in self._held_pads:
                 stop_ev = threading.Event()
                 self._held_pads[key.lower()] = stop_ev
+                # Snap first hit to the nearest repeat-grid boundary
+                wait = 0.0
+                if self.engine._phase == "running":
+                    elapsed = time.monotonic() - self.engine._t0
+                    snap = interval - (elapsed % interval)
+                    if snap >= 0.010:   # not already on/near the grid
+                        wait = snap
                 threading.Thread(
-                    target=self._run_repeat, args=(pad, stop_ev), daemon=True
+                    target=self._run_repeat, args=(pad, stop_ev, wait), daemon=True
                 ).start()
+            else:
+                self.engine.note(pad, gain=on_g)
         return None
 
     def _repeat_gains(self):
@@ -320,9 +329,14 @@ class LooperScreen(Screen):
         off = min(1.0, max(0.0, 2.0 * n))
         return on, off
 
-    def _run_repeat(self, pad: int, stop_ev: threading.Event) -> None:
+    def _run_repeat(self, pad: int, stop_ev: threading.Event, initial_wait: float = 0.0) -> None:
+        # Wait for first grid boundary then fire the on-beat note
+        if stop_ev.wait(timeout=initial_wait):
+            return
+        on_g, _ = self._repeat_gains()
+        if on_g > 0:
+            self.engine.note(pad, gain=on_g)
         beat = 0
-        _, off_g = self._repeat_gains()
         while True:
             interval = self._repeat_interval
             if interval is None or stop_ev.wait(timeout=interval):
