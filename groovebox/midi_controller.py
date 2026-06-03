@@ -171,8 +171,11 @@ class MidiController:
         stack = self._stack_getter()
         name  = type(stack[-1]).__name__ if stack else ""
         if name != self._prev_screen:
+            prev = self._prev_screen
             self._prev_screen = name
-            if name == "LooperScreen":
+            # Only apply cached knobs when returning from another real screen,
+            # not on the initial startup transition from "" → LooperScreen.
+            if name == "LooperScreen" and prev not in ("", "LooperScreen"):
                 threading.Thread(target=self._apply_cached_knobs, daemon=True).start()
         return name
 

@@ -220,6 +220,8 @@ class _StreamMixer:
 
     def load(self, path: str) -> None:
         """Read a WAV into memory as a float32 stereo array (background-thread safe)."""
+        if not isinstance(path, str):
+            return
         if path in self._samples:
             return
         try:
