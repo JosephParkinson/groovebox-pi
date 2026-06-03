@@ -1,0 +1,37 @@
+{
+  "name": "",
+  "slots": [
+    {
+      "seq_file": "sequences/bouncy.json",
+      "is_fill": false
+    },
+    {
+      "seq_file": "sequences/fill_3.json",
+      "is_fill": false
+    },
+    {
+      "seq_file": "sequences/fill__1.json",
+      "is_fill": false
+    },
+    {
+      "seq_file": null,
+      "is_fill": false
+    },
+    {
+      "seq_file": null,
+      "is_fill": false
+    },
+    {
+      "seq_file": null,
+      "is_fill": false
+    },
+    {
+      "seq_file": null,
+      "is_fill": false
+    },
+    {
+      "seq_file": null,
+      "is_fill": false
+    }
+  ]
+}

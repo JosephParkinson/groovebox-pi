@@ -1,0 +1,13 @@
+{
+  "name": "Kit 01",
+  "pads": [
+    "samples/808/01_Kick_BlindAudio_M808.wav",
+    "samples/808/02_Snare_BlindAudio_M808.wav",
+    "samples/808/05_Clave_BlindAudio_M808.wav",
+    "samples/808/09_Perc_BlindAudio_M808.wav",
+    "samples/808/04_Op_Hat_BlindAudio_M808.wav",
+    "samples/808/03_Cl_Hat_BlindAudio_M808.wav",
+    "samples/808/06_Rim_BlindAudio_M808.wav",
+    "samples/808/14_Perc_BlindAudio_M808.wav"
+  ]
+}
