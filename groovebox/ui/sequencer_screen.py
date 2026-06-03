@@ -168,15 +168,26 @@ class SequencerScreen(Screen):
         return NameInputScreen("SEQ NAME", self.seq.name, on_name)
 
 
-class SequencerMenuScreen(Screen):
-    """3-option menu: Save / Load / Rename."""
+def _new_sequence(seq: Sequencer) -> None:
+    """Reset seq to a blank 1-bar untitled sequence."""
+    with seq._lock:
+        seq.name      = "untitled"
+        seq.bars      = 1
+        seq.grid      = [[False] * seq.STEPS for _ in range(seq.PADS)]
+        seq._filepath = None
+        if seq._step >= seq.STEPS:
+            seq._step = 0
 
-    _ITEM_H = 80
+
+class SequencerMenuScreen(Screen):
+    """4-option menu: New / Save / Load / Rename."""
+
+    _ITEM_H = 60
 
     def __init__(self, seq_screen: "SequencerScreen"):
         self.seq_screen = seq_screen
         self.selected   = 0
-        self._options   = ["Save", "Load", "Rename"]
+        self._options   = ["New", "Save", "Load", "Rename"]
 
     def draw(self, draw, font, small):
         font_h = draw.textbbox((0, 0), "A", font=font)[3]
@@ -205,7 +216,12 @@ class SequencerMenuScreen(Screen):
             self.selected = (self.selected + 1) % len(self._options)
         elif key == "Return":
             action = self._options[self.selected]
-            if action == "Save":
+            if action == "New":
+                _new_sequence(self.seq_screen.seq)
+                self.seq_screen.cursor    = 0
+                self.seq_screen._view_bar = 0
+                return "back"
+            elif action == "Save":
                 result = self.seq_screen._save()
                 return result if result is not None else "back"
             elif action == "Load":

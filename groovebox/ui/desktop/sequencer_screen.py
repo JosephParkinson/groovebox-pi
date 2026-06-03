@@ -8,7 +8,7 @@ from ...audio import _preload_all
 from ...constants import GREEN, WHITE, HIGHLIGHT
 from ...sequencer import Sequencer, SEQS_DIR, save_sequence, load_sequence
 from ..base import Screen, NameInputScreen, find_font
-from ..sequencer_screen import SequenceListScreen, SequencerMenuScreen
+from ..sequencer_screen import SequenceListScreen, SequencerMenuScreen, _new_sequence
 
 # ── Layout constants ──────────────────────────────────────────────────────────
 _DW, _DH   = 1100, 700
@@ -103,6 +103,16 @@ class DesktopSequencerScreen(Screen):
         bar_txt = f"Bars: {self.seq.bars}"
         bx = draw.textbbox((0, 0), bar_txt, font=sf)
         draw.text((W - bx[2] - 130, (_HDR_H - bx[3]) // 2), bar_txt, fill=_FG_DIM, font=sf)
+
+        # NEW button (far right of header)
+        new_lbl = "NEW"
+        bx = draw.textbbox((0, 0), new_lbl, font=sf)
+        btn_w, btn_h = bx[2] + 16, bx[3] + 8
+        self._new_btn = (W - 210, (_HDR_H - btn_h) // 2,
+                         W - 210 + btn_w, (_HDR_H + btn_h) // 2)
+        x0, y0, x1, y1 = self._new_btn
+        draw.rectangle([x0, y0, x1, y1], fill=(40, 40, 40))
+        draw.text((x0 + 8, y0 + 4), new_lbl, fill=_FG, font=sf)
 
         # Play indicator (centre)
         playing = self.seq.is_running()
@@ -203,6 +213,15 @@ class DesktopSequencerScreen(Screen):
     # ── Mouse ─────────────────────────────────────────────────────────────────
 
     def handle_click(self, x: int, y: int):
+        # Click NEW button
+        if hasattr(self, "_new_btn"):
+            x0, y0, x1, y1 = self._new_btn
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                _new_sequence(self.seq)
+                self.cursor    = 0
+                self._view_bar = 0
+                return None
+
         # Click on bar tab
         bar = self._hit_tab(x, y)
         if bar is not None:
@@ -265,6 +284,10 @@ class DesktopSequencerScreen(Screen):
             def on_name(name):
                 seq_ref.name = name
             return NameInputScreen("SEQ NAME", self.seq.name, on_name)
+        elif key == "N":   # shift-N = new sequence
+            _new_sequence(self.seq)
+            self.cursor    = 0
+            self._view_bar = 0
         elif key.lower() in KEY_MAP:
             g_step = self._view_bar * Sequencer.STEPS + self.cursor
             self.seq.toggle(KEY_MAP[key.lower()], g_step)

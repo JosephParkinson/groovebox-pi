@@ -304,7 +304,9 @@ class SongPlayerScreen(Screen):
         slot = self.song.slots[slot_idx]
         if not slot.seq_file:
             return
+        master_bpm = self._seq.bpm          # preserve song tempo across sequence changes
         load_sequence(self._seq, slot.seq_file)
+        self._seq.bpm = master_bpm
         with self._lock:
             self._current = slot_idx
         self._seq.restart()
@@ -319,8 +321,10 @@ class SongPlayerScreen(Screen):
                 self._fill_ret = self._current
                 self._is_fill  = True
                 self._queued   = None
+            master_bpm = self._seq.bpm
             self._seq.stop()
             load_sequence(self._seq, slot.seq_file)
+            self._seq.bpm = master_bpm
             self._seq.restart()
         elif not self._seq.is_running() and self._current is None:
             if self._count_in:
