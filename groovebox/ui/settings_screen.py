@@ -1,9 +1,53 @@
 import subprocess
+import threading
 from pathlib import Path
 
-from ..constants import FG, FG_DIM, HIGHLIGHT, RED, WHITE, WIDTH, HEIGHT
+from ..constants import FG, FG_DIM, HIGHLIGHT, GREEN, RED, WHITE, WIDTH, HEIGHT
 from ..settings import Settings
 from .base import Screen, centered_x
+
+
+class GitPullScreen(Screen):
+    _REPO = Path(__file__).parent.parent.parent
+
+    def __init__(self):
+        self._lines  = ["Pulling…"]
+        self._done   = False
+        self._ok     = False
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def _run(self):
+        try:
+            r = subprocess.run(
+                ["git", "pull"],
+                cwd=self._REPO,
+                capture_output=True, text=True, timeout=30,
+            )
+            out = (r.stdout + r.stderr).strip()
+            self._lines = (out.splitlines() or ["(no output)"])[-6:]
+            self._ok    = r.returncode == 0
+        except Exception as e:
+            self._lines = [str(e)]
+            self._ok    = False
+        self._done = True
+
+    def draw(self, draw, font, small):
+        small_h = draw.textbbox((0, 0), "A", font=small)[3]
+        title   = "Pull Updates"
+        draw.text((8, 6), title, fill=WHITE, font=font)
+        y = 6 + draw.textbbox((0, 0), "A", font=font)[3] + 8
+        for line in self._lines:
+            col = GREEN if (self._done and self._ok) else (FG_DIM if not self._done else RED)
+            draw.text((8, y), line[:28], fill=col, font=small)
+            y += small_h + 2
+        if self._done:
+            hint = "Bksp: back"
+            draw.text((8, HEIGHT - small_h - 4), hint, fill=FG_DIM, font=small)
+
+    def handle_key(self, key):
+        if key == "BackSpace":
+            return "back"
+        return None
 
 _ROW_H   = 34
 _VISIBLE = HEIGHT // _ROW_H   # rows that fit on screen at once
@@ -38,7 +82,8 @@ class SettingsScreen(Screen):
         ]
         self._debug_idx   = len(self._rows)
         self._restart_idx = len(self._rows) + 1
-        self._total       = len(self._rows) + 2  # + Debug + Restart Pi
+        self._pull_idx    = len(self._rows) + 2
+        self._total       = len(self._rows) + 3  # + Debug + Restart Pi + Pull Updates
 
     def draw(self, draw, font, small):
         font_h = draw.textbbox((0, 0), "A", font=font)[3]
@@ -72,6 +117,10 @@ class SettingsScreen(Screen):
                 lbl = "Restart Pi"
                 col = WHITE if sel else (220, 80, 80)
                 draw.text((12, cy), lbl, fill=col, font=font)
+
+            elif idx == self._pull_idx:
+                draw.text((12, cy), "Pull Updates", fill=txt_col, font=font)
+                draw.text((WIDTH - 28, cy), "↓", fill=txt_col, font=font)
 
             draw.line([(0, row_y + _ROW_H - 1), (WIDTH - 1, row_y + _ROW_H - 1)],
                       fill=(40, 40, 40))
@@ -113,5 +162,7 @@ class SettingsScreen(Screen):
                 return DebugScreen()
             elif self.cursor == self._restart_idx:
                 subprocess.Popen(["sudo", "reboot"])
+            elif self.cursor == self._pull_idx:
+                return GitPullScreen()
 
         return None
