@@ -41,6 +41,10 @@ from groovebox.ui.base import Screen, find_font, pil_to_tk
 from groovebox.midi_clock import MidiClockMaster
 from groovebox.midi_controller import MidiController
 from groovebox.ui.main_menu import MainMenu
+from groovebox.ui.sequencer_screen import SequencerScreen
+from groovebox.ui.song_screen import SongPlayerScreen
+from groovebox.ui.desktop.sequencer_screen import DesktopSequencerScreen
+from groovebox.ui.desktop.song_screen import DesktopSongPlayerScreen
 
 # ImageTk gives ~3–5× faster tkinter updates than the PPM fallback.
 try:
@@ -257,6 +261,137 @@ class Groovebox:
         self.root.after(self._tick_ms, self._tick)
 
 
+# ── Desktop mode ─────────────────────────────────────────────────────────────
+
+_DESKTOP_W = 1100
+_DESKTOP_H = 700
+
+
+def _wrap_for_desktop(screen: Screen) -> Screen:
+    """Replace Pi screen variants with their desktop equivalents."""
+    if isinstance(screen, SequencerScreen):
+        return DesktopSequencerScreen(screen.seq)
+    if isinstance(screen, SongPlayerScreen):
+        return DesktopSongPlayerScreen(screen.song, screen._seq)
+    return screen
+
+
+class DesktopGroovebox(Groovebox):
+    """Groovebox with a larger window, new-layout screens, and mouse support."""
+
+    def __init__(self, root):
+        import tkinter as tk
+        # Build app state directly (bypass parent __init__ to control canvas size)
+        root.title("Groovebox — Desktop")
+        root.resizable(True, True)
+
+        self.root = root
+        self.canvas = tk.Canvas(root, width=_DESKTOP_W, height=_DESKTOP_H,
+                                bg="black", highlightthickness=0)
+        self.canvas.pack(fill="both", expand=True)
+
+        (self.kit, self.engine, self.seq,
+         self.settings) = _build_app_state()
+
+        self.stack: list[Screen] = [
+            MainMenu(self.kit, self.engine, self.seq, self.settings)
+        ]
+
+        self._tk_photo     = None
+        self._use_image_tk = _HAS_IMAGE_TK
+        self.image_id      = None
+        self._lcd_cnt      = 0
+        self._pending_keyup: dict[str, object] = {}
+        self._tick_ms  = 40   # 25 fps — desktop machines can handle it
+        self._lcd_skip = 1
+
+        _start_audio(self.kit)
+        init_buttons(self._gpio_key)
+
+        def midi_cb(k):
+            self.root.after(0, lambda _k=k: self._dispatch(_k))
+
+        self._midi = MidiController(
+            engine       = self.engine,
+            seq          = self.seq,
+            stack_getter = lambda: self.stack,
+            key_callback = midi_cb,
+        )
+        self._midi.connect()
+        self._clock = MidiClockMaster(self.engine)
+        self._clock.connect()
+
+        root.bind("<Key>",        self._on_key)
+        root.bind("<KeyRelease>", self._on_keyup)
+        root.bind("<Button-1>",   self._on_click)
+        root.lift()
+        root.focus_force()
+        self._tick()
+
+    # Override render to use full desktop size for desktop screens,
+    # scale-up + centre for Pi screens
+    def _render(self) -> Image.Image:
+        screen = self.stack[-1] if self.stack else None
+        is_desktop = getattr(screen, "_is_desktop_screen", False)
+
+        if is_desktop:
+            img  = Image.new("RGB", (_DESKTOP_W, _DESKTOP_H), BG)
+            draw = ImageDraw.Draw(img)
+            font  = find_font(18)
+            small = find_font(13)
+            screen.draw(draw, font, small)
+        else:
+            # Render Pi screen at 480×480 and centre
+            pi_w, pi_h = 480, 480
+            img_pi = Image.new("RGB", (pi_w, pi_h), BG)
+            draw   = ImageDraw.Draw(img_pi)
+            font   = find_font(self.settings.font_medium * 2)
+            small  = find_font(self.settings.font_small  * 2)
+            if screen:
+                screen.draw(draw, font, small)
+            img = Image.new("RGB", (_DESKTOP_W, _DESKTOP_H), BG)
+            ox  = (_DESKTOP_W - pi_w) // 2
+            oy  = (_DESKTOP_H - pi_h) // 2
+            img.paste(img_pi, (ox, oy))
+        return img
+
+    # Swap Pi screens for desktop equivalents when pushing to the stack
+    def _apply_and_wrap(self, result) -> None:
+        if isinstance(result, Screen):
+            result = _wrap_for_desktop(result)
+        _apply_result(self.stack, result)
+
+    def _on_key(self, event):
+        if event.keysym in self._pending_keyup:
+            self.root.after_cancel(self._pending_keyup.pop(event.keysym))
+        log_push("KEY", event.keysym)
+        result = self.stack[-1].handle_key(event.keysym) if self.stack else None
+        if result is None and event.char and event.char != event.keysym:
+            result = self.stack[-1].handle_key(event.char)
+        self._apply_and_wrap(result)
+
+    def _dispatch(self, keysym: str) -> None:
+        if self.stack:
+            self._apply_and_wrap(self.stack[-1].handle_key(keysym))
+
+    def _on_click(self, event):
+        screen = self.stack[-1] if self.stack else None
+        if screen and hasattr(screen, "handle_click"):
+            # For Pi screens rendered at offset, translate coordinates
+            is_desktop = getattr(screen, "_is_desktop_screen", False)
+            if is_desktop:
+                result = screen.handle_click(event.x, event.y)
+            else:
+                ox = (_DESKTOP_W - 480) // 2
+                oy = (_DESKTOP_H - 480) // 2
+                # Map from desktop coords back to 240×240 Pi coords
+                px = (event.x - ox) * 240 // 480
+                py = (event.y - oy) * 240 // 480
+                result = screen.handle_click(px, py) if hasattr(screen, "handle_click") else None
+            if result is not None:
+                self._apply_and_wrap(result)
+
+
 # ── Headless mode (Pi without HDMI) ──────────────────────────────────────────
 
 def run_headless() -> None:
@@ -329,6 +464,11 @@ def main():
 
     if "--headless" in sys.argv or not _has_display():
         run_headless()
+    elif "--desktop" in sys.argv:
+        import tkinter as tk
+        root = tk.Tk()
+        DesktopGroovebox(root)
+        root.mainloop()
     else:
         import tkinter as tk
         root = tk.Tk()

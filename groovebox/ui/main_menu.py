@@ -8,8 +8,9 @@ from .kits import KitsScreen
 from .looper_screen import LooperScreen
 from .sequencer_screen import SequencerScreen
 from .settings_screen import SettingsScreen
+from .song_screen import SongListScreen
 
-_ITEM_H = 60   # each item occupies exactly 60px → 4 × 60 = 240
+_ITEM_H = 48   # 5 × 48 = 240
 
 
 class MainMenu(Screen):
@@ -21,6 +22,7 @@ class MainMenu(Screen):
         self.selected = 0
         self._options = [
             ("PLAY",      lambda: LooperScreen(self.kit, self.engine, self.settings)),
+            ("SONG",      lambda: SongListScreen(self.seq)),
             ("KITS",      lambda: KitsScreen(self.kit)),
             ("SEQUENCER", lambda: SequencerScreen(self.seq)),
             ("SETTINGS",  lambda: SettingsScreen(self.settings)),
@@ -39,7 +41,6 @@ class MainMenu(Screen):
             cx = centered_x(draw, label, font)
             cy = item_y + (_ITEM_H - font_h) // 2
             draw.text((cx, cy), label, fill=txt_col, font=font)
-            # 1px separator at bottom of each item
             draw.line([(0, item_y + _ITEM_H - 1), (WIDTH - 1, item_y + _ITEM_H - 1)],
                       fill=(40, 40, 40))
 

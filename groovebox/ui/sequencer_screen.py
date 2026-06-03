@@ -7,16 +7,15 @@ from .base import Screen, NameInputScreen, centered_x
 
 _PAD_LABELS = "QWERASDF"
 
-# Grid geometry
-_LABEL_W = 16   # px reserved for the pad letter on the left (widened for 16px font)
-_STEP_W  = 14   # px per step column (13 content + 1 gap)
-_ROW_H   = 25   # px per pad row   (taller rows — no title above)
-_GRID_X  = _LABEL_W                      # x where step columns begin
-_GRID_Y  = 14                            # y where rows begin (below thin header strip)
-_GRID_W  = Sequencer.STEPS * _STEP_W    # 224 px
-_GRID_H  = Sequencer.PADS  * _ROW_H     # 200 px
+# Grid geometry (Pi 240×240)
+_LABEL_W = 16
+_STEP_W  = 14
+_ROW_H   = 25
+_GRID_X  = _LABEL_W
+_GRID_Y  = 14
+_GRID_W  = Sequencer.STEPS * _STEP_W   # 224 px
+_GRID_H  = Sequencer.PADS  * _ROW_H    # 200 px
 
-# Colours
 _CURSOR_FILL   = (0,  35,  90)
 _CURSOR_EDGE   = HIGHLIGHT
 _ACTIVE_A      = (0, 155,  55)
@@ -26,13 +25,15 @@ _INACTIVE_EDGE = (55, 55, 55)
 
 class SequencerScreen(Screen):
     def __init__(self, seq: Sequencer):
-        self.seq    = seq
-        self.cursor = 0
+        self.seq       = seq
+        self.cursor    = 0
+        self._view_bar = 0
         threading.Thread(target=lambda: _preload_all(seq.kit), daemon=True).start()
 
-    # ── Geometry helpers ─────────────────────────────────────────────────────
+    # ── Geometry ─────────────────────────────────────────────────────────────
 
     def _cell(self, pad: int, step: int) -> tuple[int, int, int, int]:
+        """step = local step within the current view bar (0-15)."""
         x = _GRID_X + step * _STEP_W
         y = _GRID_Y + pad  * _ROW_H
         return x, y, x + _STEP_W - 1, y + _ROW_H - 1
@@ -41,13 +42,18 @@ class SequencerScreen(Screen):
 
     def draw(self, draw, font, small):
         playing  = self.seq.is_running()
-        cur_step = self.seq.current_step()
+        cur_step = self.seq.current_step()   # global step 0..total-1
 
-        # Header strip (y=0..13): name left, play indicator + BPM right
-        name_disp = (self.seq.name[:10] + "…") if len(self.seq.name) > 10 else self.seq.name
+        # Header: name | bar indicator | play+BPM
+        name_disp = (self.seq.name[:7] + "…") if len(self.seq.name) > 7 else self.seq.name
         draw.text((4, 1), name_disp, fill=FG, font=small)
+
+        bar_txt = f"B{self._view_bar + 1}/{self.seq.bars}"
+        bx = draw.textbbox((0, 0), bar_txt, font=small)
+        draw.text(((WIDTH - bx[2]) // 2, 1), bar_txt, fill=FG_DIM, font=small)
+
         indicator = ">" if playing else "."
-        bpm_txt   = f"{indicator} {int(self.seq.bpm)}bpm"
+        bpm_txt   = f"{indicator}{int(self.seq.bpm)}"
         bx = draw.textbbox((0, 0), bpm_txt, font=small)
         draw.text((WIDTH - bx[2] - 4, 1), bpm_txt,
                   fill=GREEN if playing else FG_DIM, font=small)
@@ -58,10 +64,13 @@ class SequencerScreen(Screen):
             draw.line([(lx, _GRID_Y - 3), (lx, _GRID_Y + _GRID_H + 2)],
                       fill=(40, 40, 40), width=1)
 
-        # Playhead bar
+        # Playhead (only if playing step is in the current view bar)
         if cur_step is not None:
-            px = _GRID_X + cur_step * _STEP_W
-            draw.rectangle([px, _GRID_Y - 3, px + _STEP_W - 2, _GRID_Y - 1], fill=WHITE)
+            cur_bar = cur_step // Sequencer.STEPS
+            if cur_bar == self._view_bar:
+                local = cur_step % Sequencer.STEPS
+                px    = _GRID_X + local * _STEP_W
+                draw.rectangle([px, _GRID_Y - 3, px + _STEP_W - 2, _GRID_Y - 1], fill=WHITE)
 
         # Cursor column marker
         cx = _GRID_X + self.cursor * _STEP_W
@@ -69,12 +78,15 @@ class SequencerScreen(Screen):
                        fill=_CURSOR_EDGE)
 
         # Grid cells
+        bar_offset = self._view_bar * Sequencer.STEPS
         for pad in range(Sequencer.PADS):
             draw.text((1, _GRID_Y + pad * _ROW_H + 4),
                       _PAD_LABELS[pad], fill=FG_DIM, font=small)
             for step in range(Sequencer.STEPS):
                 x0, y0, x1, y1 = self._cell(pad, step)
-                active    = self.seq.grid[pad][step]
+                g_step = bar_offset + step
+                row    = self.seq.grid[pad]
+                active    = row[g_step] if g_step < len(row) else False
                 is_cursor = step == self.cursor
                 if active:
                     fill = _ACTIVE_A if (step // 4) % 2 == 0 else _ACTIVE_B
@@ -86,16 +98,32 @@ class SequencerScreen(Screen):
                 if active and is_cursor:
                     draw.rectangle([x0, y0, x1, y1], outline=_CURSOR_EDGE)
 
-
     # ── Input ────────────────────────────────────────────────────────────────
 
     def handle_key(self, key):
         if key == "BackSpace":
             return "back"
         elif key == "Left":
-            self.cursor = (self.cursor - 1) % Sequencer.STEPS
+            if self.cursor > 0:
+                self.cursor -= 1
+            elif self._view_bar > 0:
+                self._view_bar -= 1
+                self.cursor = Sequencer.STEPS - 1
         elif key == "Right":
-            self.cursor = (self.cursor + 1) % Sequencer.STEPS
+            if self.cursor < Sequencer.STEPS - 1:
+                self.cursor += 1
+            elif self._view_bar < self.seq.bars - 1:
+                self._view_bar += 1
+                self.cursor = 0
+        elif key == "bracketleft":      # [ — prev bar
+            self._view_bar = max(0, self._view_bar - 1)
+        elif key == "bracketright":     # ] — next bar
+            self._view_bar = min(self.seq.bars - 1, self._view_bar + 1)
+        elif key == "b":                # add a bar
+            self.seq.set_bars(min(16, self.seq.bars + 1))
+        elif key == "v":                # remove a bar
+            self.seq.set_bars(max(1, self.seq.bars - 1))
+            self._view_bar = min(self._view_bar, self.seq.bars - 1)
         elif key == "Return":
             return SequencerMenuScreen(self)
         elif key == "space":
@@ -117,18 +145,19 @@ class SequencerScreen(Screen):
                 seq_ref.name = name
             return NameInputScreen("SEQ NAME", self.seq.name, on_name)
         elif key.lower() in KEY_MAP:
-            self.seq.toggle(KEY_MAP[key.lower()], self.cursor)
+            g_step = self._view_bar * Sequencer.STEPS + self.cursor
+            self.seq.toggle(KEY_MAP[key.lower()], g_step)
         return None
 
     def _save(self):
         if self.seq._filepath:
             save_sequence(self.seq, self.seq._filepath)
-            return None  # save in place, no screen push
+            return None
         seq_ref = self.seq
         def on_name(name):
             seq_ref.name = name
             SEQS_DIR.mkdir(exist_ok=True)
-            slug = name.lower().replace(" ", "_")
+            slug     = name.lower().replace(" ", "_")
             existing = {f.stem for f in SEQS_DIR.glob("*.json")} if SEQS_DIR.exists() else set()
             stem = slug or "seq"
             n = 1
@@ -140,9 +169,9 @@ class SequencerScreen(Screen):
 
 
 class SequencerMenuScreen(Screen):
-    """3-option menu: Save / Load / Rename — opened from SequencerScreen via Enter."""
+    """3-option menu: Save / Load / Rename."""
 
-    _ITEM_H = 80   # 3 × 80 = 240
+    _ITEM_H = 80
 
     def __init__(self, seq_screen: "SequencerScreen"):
         self.seq_screen = seq_screen
@@ -178,10 +207,7 @@ class SequencerMenuScreen(Screen):
             action = self._options[self.selected]
             if action == "Save":
                 result = self.seq_screen._save()
-                # Pop menu; if _save returns a screen (NameInputScreen), push that
-                if result is not None:
-                    return result
-                return "back"
+                return result if result is not None else "back"
             elif action == "Load":
                 return SequenceListScreen(self.seq_screen.seq)
             elif action == "Rename":
