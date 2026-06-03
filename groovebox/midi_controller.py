@@ -131,6 +131,8 @@ class MidiController:
         # Joystick must dwell in neutral for this long before a new direction fires.
         # Filters spring-back artefacts (typically <80ms) after releasing the stick.
         self._STICK_SETTLE = 0.15
+        self._cc_cache: dict[int, int] = {}   # last known value for every CC
+        self._prev_screen: str = ""
 
         self._handler = MidiHandler(
             on_note           = self._on_note,
@@ -167,7 +169,31 @@ class MidiController:
 
     def _screen(self) -> str:
         stack = self._stack_getter()
-        return type(stack[-1]).__name__ if stack else ""
+        name  = type(stack[-1]).__name__ if stack else ""
+        if name != self._prev_screen:
+            self._prev_screen = name
+            if name == "LooperScreen":
+                threading.Thread(target=self._apply_cached_knobs, daemon=True).start()
+        return name
+
+    def _apply_cached_knobs(self) -> None:
+        _time.sleep(0.05)   # let the screen settle onto the stack
+        s = self._looper_screen()
+        if s is None:
+            return
+        # Apply track select first so track-specific knobs target the right channel
+        if CC_TRACK_VOL in self._cc_cache:
+            s.cursor = self._segment(self._cc_cache[CC_TRACK_VOL], 4)
+        if CC_TRACK_LEN in self._cc_cache:
+            idx  = self._segment(self._cc_cache[CC_TRACK_LEN], len(_LOOP_LENGTHS))
+            self._engine.set_bars_absolute(s.cursor, _LOOP_LENGTHS[idx])
+        if CC_TRACK_TYPE in self._cc_cache:
+            idx  = self._segment(self._cc_cache[CC_TRACK_TYPE], len(_LOOP_MODES))
+            self._engine.set_rec_mode(s.cursor, _LOOP_MODES[idx])
+        if CC_TRACK_QUANT in self._cc_cache:
+            idx  = self._segment(self._cc_cache[CC_TRACK_QUANT], len(_QUANT_OPTS))
+            self._engine.settings.quantize = _QUANT_OPTS[idx]
+            self._engine.settings.save()
 
     def _looper_screen(self):
         """Return the LooperScreen if it's the current screen, else None."""
@@ -211,6 +237,7 @@ class MidiController:
                 self._key("BackSpace")
 
     def _on_cc(self, control: int, value: int) -> None:
+        self._cc_cache[control] = value
         # ── K1: note-repeat frequency ────────────────────────────────────────
         if control == CC_NOTE_REPEAT_FREQ:
             idx = self._segment(value, len(_REPEAT_FREQS))
