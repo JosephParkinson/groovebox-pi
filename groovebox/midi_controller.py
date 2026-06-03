@@ -19,8 +19,8 @@ Physical layout (as seen from the player):
   Joystick (left of keys): X-axis = pitch bend, Y-axis = mod (CC 1)
 
 DEFAULT PRESET 1 — Bank A note numbers (update NOTE_TO_KEY if yours differ):
-  P5=50, P6=45, P7=49, P8=51   (top: q w e r in the groovebox)
-  P1=36, P2=38, P3=42, P4=46   (bot: a s d f in the groovebox)
+  P5=48, P6=49, P7=50, P8=51   (top: q w e r in the groovebox)
+  P1=44, P2=45, P3=46, P4=47   (bot: a s d f in the groovebox)
 
 Knob CC defaults:
   K1 (top-left)  = CC 1   → master volume
@@ -53,15 +53,16 @@ import time as _time
 from midi import MidiHandler
 
 # ── Pad note → groovebox keyboard key ──────────────────────────────────────
-# Top row of MPK pads maps to Q W E R (groovebox pads 0-3)
-# Bottom row maps to A S D F (groovebox pads 4-7)
+# Pads 1-8 = notes 44-51 in order.
+# Top row P5-P8 (notes 48-51) → q w e r (kit indices 4-7)
+# Bot row P1-P4 (notes 44-47) → a s d f (kit indices 0-3)
 # Update these if your device sends different notes (check Debug screen).
 NOTE_TO_KEY: dict[int, str] = {
-    50: "q",  45: "w",  49: "e",  51: "r",   # top pads  → q w e r
-    36: "a",  38: "s",  42: "d",  46: "f",   # bot pads  → a s d f
+    48: "q",  49: "w",  50: "e",  51: "r",   # top pads P5-P8 → q w e r
+    44: "a",  45: "s",  46: "d",  47: "f",   # bot pads P1-P4 → a s d f
 }
 NOTE_TOP_RIGHT = 51   # P8 — Enter  (outside play/seq)
-NOTE_TOP_BACK  = 49   # P7 — Back   (outside play/seq)
+NOTE_TOP_BACK  = 50   # P7 — Back   (outside play/seq)
 
 # ── CC pad actions (CC-button mode) ────────────────────────────────────────
 # (action, channel_index)
