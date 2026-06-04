@@ -5,7 +5,7 @@ from ..constants import FG, FG_DIM, HIGHLIGHT, GREEN, WHITE, WIDTH, HEIGHT, KEY_
 from ..sequencer import Sequencer, SEQS_DIR, save_sequence, load_sequence
 from .base import Screen, NameInputScreen, centered_x
 
-_PAD_LABELS = "QWERASDF"
+_PAD_LABELS = "ASDFQWER"
 
 # Grid geometry (Pi 240×240)
 _LABEL_W = 16
@@ -135,7 +135,7 @@ class SequencerScreen(Screen):
             self.seq.bpm = max(40.0, self.seq.bpm - 1)
         elif key in ("equal", "="):
             self.seq.bpm = min(300.0, self.seq.bpm + 1)
-        elif key == "s":
+        elif key == "S":
             return self._save()
         elif key == "l":
             return SequenceListScreen(self.seq)

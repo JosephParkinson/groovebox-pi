@@ -33,7 +33,7 @@ _CURSOR_BG = (0,   35,  90)
 _BEAT_DIV  = (50,  50,  50)
 _PLAY_BAR  = (255, 255, 255)
 
-_PAD_LABELS = "QWERASDF"
+_PAD_LABELS = "ASDFQWER"
 
 
 class DesktopSequencerScreen(Screen):
@@ -204,7 +204,7 @@ class DesktopSequencerScreen(Screen):
         # ── Footer ────────────────────────────────────────────────────────────
         draw.rectangle([0, _GRID_BOT, W - 1, H - 1], fill=(10, 10, 10))
         hints = ("Click cell to toggle  |  Space: play/stop  |  ←/→: move cursor  "
-                 "|  [/]: change bar  |  b/v: add/remove bar  |  s: save  |  -/+: BPM")
+                 "|  [/]: change bar  |  b/v: add/remove bar  |  S: save  |  -/+: BPM")
         bx = draw.textbbox((0, 0), hints, font=sf)
         draw.text(((W - bx[2]) // 2,
                    _GRID_BOT + (_FOOT_H - bx[3]) // 2),
@@ -275,7 +275,7 @@ class DesktopSequencerScreen(Screen):
             self.seq.bpm = max(40.0, self.seq.bpm - 1)
         elif key in ("equal", "="):
             self.seq.bpm = min(300.0, self.seq.bpm + 1)
-        elif key == "s":
+        elif key == "S":
             return self._save()
         elif key == "l":
             return SequenceListScreen(self.seq)

@@ -33,8 +33,9 @@ _SIDE_BG = (12, 12, 12)
 def _pad_rect(i: int) -> tuple[int, int, int, int]:
     row = i // _PAD_COLS
     col = i  % _PAD_COLS
+    display_row = _PAD_ROWS - 1 - row   # pads 1-4 (row 0) on bottom, 5-8 (row 1) on top
     x0  = _PAD_AREA_X + _GAP + col * (_PAD_W + _GAP)
-    y0  = _HDR_H + _GAP + row * (_PAD_H + _GAP)
+    y0  = _HDR_H + _GAP + display_row * (_PAD_H + _GAP)
     return x0, y0, x0 + _PAD_W - 1, y0 + _PAD_H - 1
 
 
@@ -46,6 +47,9 @@ class DesktopSongPlayerScreen(Screen):
         self._player = SongPlayerScreen(song, seq)
         self.song    = song
         self._seq    = seq
+
+    def _press_pad(self, slot_idx: int):
+        self._player._press_pad(slot_idx)
 
     def handle_click(self, x: int, y: int):
         # Click on pad

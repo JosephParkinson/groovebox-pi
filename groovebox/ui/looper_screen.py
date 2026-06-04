@@ -276,7 +276,7 @@ class LooperScreen(Screen):
             self.engine.set_bars(self.cursor, -1)
         elif key == "Right":
             self.engine.set_bars(self.cursor, +1)
-        elif key == "r":
+        elif key == "space":
             self.engine.stop()
         elif key == "m":
             self.engine.metronome = not self.engine.metronome

@@ -64,6 +64,13 @@ NOTE_TO_KEY: dict[int, str] = {
 NOTE_TOP_RIGHT = 51   # P8 — Enter  (outside play/seq)
 NOTE_TOP_BACK  = 50   # P7 — Back   (outside play/seq)
 
+# Bank B top row P5-P8 → song-player slot triggers (0-indexed, tracks 1-4)
+# Assumes Bank B = Bank A + 12 semitones (one octave up), i.e. 60-63.
+# ⚠ Verify with Settings → Debug: press each Bank B top-row pad and check the note.
+NOTE_B_TO_SONG_SLOT: dict[int, int] = {
+    60: 0,  61: 1,  62: 2,  63: 3,   # Bank B P5-P8 → tracks 1-4
+}
+
 # ── CC pad actions (CC-button mode) ────────────────────────────────────────
 # (action, channel_index)
 CC_PAD: dict[int, tuple[str, int]] = {
@@ -133,6 +140,7 @@ class MidiController:
         self._STICK_SETTLE = 0.15
         self._cc_cache: dict[int, int] = {}   # last known value for every CC
         self._prev_screen: str = ""
+        self._arm_press_times: dict[int, float] = {}  # ch → time of arm press
 
         self._handler = MidiHandler(
             on_note           = self._on_note,
@@ -140,6 +148,7 @@ class MidiController:
             on_pitchwheel     = self._on_pitchwheel,
             on_program_change = self._on_program_change,
         )
+        threading.Thread(target=self._arm_hold_watcher, daemon=True).start()
 
     def connect(self, port_name: str | None = None) -> bool:
         result = self._handler.connect(port_name)
@@ -214,9 +223,32 @@ class MidiController:
         """Map a CC value 0-127 to an index 0..n_options-1."""
         return min(n_options - 1, value * n_options // 128)
 
+    def _arm_hold_watcher(self) -> None:
+        """Delete looper channel when its ARM pad is held for 0.7 s."""
+        _HOLD = 0.7
+        while True:
+            _time.sleep(0.025)
+            now = _time.monotonic()
+            for ch, t in list(self._arm_press_times.items()):
+                if now - t >= _HOLD:
+                    self._arm_press_times.pop(ch, None)
+                    if self._screen() == "LooperScreen":
+                        self._engine.delete_channel(ch)
+
     # ── MIDI callbacks (called from background MIDI thread) ───────────────────
 
     def _on_note(self, note: int, velocity: int) -> None:
+        # Bank B song-mode trigger (top row P5-P8 while on SongPlayerScreen)
+        song_slot = NOTE_B_TO_SONG_SLOT.get(note)
+        if song_slot is not None:
+            if velocity > 0:
+                screen = self._screen()
+                if screen in ("SongPlayerScreen", "DesktopSongPlayerScreen"):
+                    stack = self._stack_getter()
+                    if stack:
+                        stack[-1]._press_pad(song_slot)
+            return
+
         key = NOTE_TO_KEY.get(note)
         if key is None:
             return
@@ -231,7 +263,8 @@ class MidiController:
                     stack[-1].handle_keyup(key)
             return
 
-        if screen in ("LooperScreen", "SequencerScreen", "InstrumentsScreen"):
+        if screen in ("LooperScreen", "SequencerScreen", "InstrumentsScreen",
+                      "SongEditorScreen"):
             self._key(key)
         else:
             if note == NOTE_TOP_RIGHT:
@@ -322,7 +355,10 @@ class MidiController:
             action, ch = CC_PAD[control]
             if action == "arm":
                 if value > 0:
+                    self._arm_press_times[ch] = _time.monotonic()
                     self._engine.prime(ch)
+                else:
+                    self._arm_press_times.pop(ch, None)
             elif action == "mute":
                 self._engine.set_mute(ch, value > 0)
 
@@ -357,7 +393,9 @@ class MidiController:
             self._engine.stop()
             self._seq.stop()
         elif program == PC_PLAY:
-            if self._seq.is_running():
+            if self._screen() == "SongEditorScreen":
+                self._key("p")   # enter song player from the editor
+            elif self._seq.is_running():
                 self._seq.stop()
             else:
                 self._seq.start()

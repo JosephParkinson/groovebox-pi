@@ -147,7 +147,7 @@ class SongEditorScreen(Screen):
         label = _seq_display_name(slot.seq_file, 18) if slot.seq_file else "(empty)"
         draw.text((8, info_y), label, fill=FG if slot.seq_file else FG_DIM, font=font)
 
-        hint = "Ret:pick  f:fill  s:save  p:play"
+        hint = "f:fill  Ret:pick  s:save  p:play"
         draw.text((4, HEIGHT - draw.textbbox((0,0),"A",font=small)[3] - 2),
                   hint, fill=(65, 65, 65), font=small)
 
@@ -155,6 +155,8 @@ class SongEditorScreen(Screen):
         row, col = divmod(self.cursor, PAD_COLS)
         if key == "BackSpace":
             return "back"
+        elif key == "f":
+            self.song.slots[self.cursor].is_fill = not self.song.slots[self.cursor].is_fill
         elif key in KEY_MAP:
             self.cursor = KEY_MAP[key]
         elif key == "Up" and row > 0:
@@ -167,8 +169,6 @@ class SongEditorScreen(Screen):
             self.cursor += 1
         elif key == "Return":
             return SongSlotPickerScreen(self.song, self.cursor, self)
-        elif key == "f":
-            self.song.slots[self.cursor].is_fill = not self.song.slots[self.cursor].is_fill
         elif key == "s":
             self._save()
         elif key == "n":
@@ -300,6 +300,9 @@ class SongPlayerScreen(Screen):
         if next_slot is not None:
             self._load_and_play(next_slot)
 
+    def _seq_name(self, slot_idx: int) -> str:
+        return _seq_display_name(self.song.slots[slot_idx].seq_file)
+
     def _load_and_play(self, slot_idx: int):
         slot = self.song.slots[slot_idx]
         if not slot.seq_file:
@@ -401,8 +404,8 @@ class SongPlayerScreen(Screen):
             txt = f"Count-in: {self._count_down}"
             draw.text((centered_x(draw, txt, font), info_y), txt, fill=AMBER, font=font)
         else:
-            cur_name  = _seq_display_name(current, 12) if current is not None else "—"
-            next_name = _seq_display_name(queued,  11) if queued  is not None else "—"
+            cur_name  = _seq_display_name(self.song.slots[current].seq_file, 12) if current is not None else "—"
+            next_name = _seq_display_name(self.song.slots[queued].seq_file,  11) if queued  is not None else "—"
             draw.text((8, info_y), f"NOW: {cur_name}", fill=FG, font=small)
             draw.text((8, info_y + small_h + 2), f"NEXT: {next_name}", fill=FG_DIM, font=small)
 
