@@ -181,7 +181,7 @@ MIXER_SAMPLERATE: int = 44100
 MIXER_BLOCKSIZE:  int = 512
 
 
-_PREFERRED_DEVICE_KEYWORDS = ["komplete", "k1"]   # searched in order, case-insensitive
+_PREFERRED_DEVICE_KEYWORDS = ["komplete audio"]   # searched in order, case-insensitive
 
 
 def _find_output_device() -> int | None:
@@ -226,16 +226,28 @@ class _StreamMixer:
         self._samples: dict[str, "np.ndarray"] = {}
         self._queue:   deque = deque()   # main thread → callback, lockless
         self._active:  list  = []        # owned exclusively by the callback
-        self._stream = sd.OutputStream(
-            device=_find_output_device(),
+        device = _find_output_device()
+        _common = dict(
             samplerate=self._sr,
             channels=2,
             dtype="float32",
             blocksize=MIXER_BLOCKSIZE,
-            latency=0.05,               # 50 ms total output budget — prevents xruns on Pi
+            latency=0.05,
             callback=self._callback,
         )
+        try:
+            self._stream = sd.OutputStream(device=device, **_common)
+        except Exception as e:
+            if device is not None:
+                print(f"[audio] preferred device failed ({e}), falling back to system default",
+                      file=sys.stderr)
+                self._stream = sd.OutputStream(device=None, **_common)
+            else:
+                raise
         self._stream.start()
+        print(f"[audio] stream open: device={self._stream.device!r} "
+              f"sr={int(self._stream.samplerate)} latency={self._stream.latency:.3f}s",
+              file=sys.stderr)
 
     def load(self, path: str) -> None:
         """Read a WAV into memory as a float32 stereo array (background-thread safe)."""
